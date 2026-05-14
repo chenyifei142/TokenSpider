@@ -31,7 +31,7 @@ class SystemTray:
         self.icon = pystray.Icon(
             "TokenSpider",
             _create_icon_image(),
-            "TokenSpider - LLM Usage Monitor",
+            "TokenSpider - LLM 用量监控",
             menu=pystray.Menu(
                 pystray.MenuItem("显示/隐藏", self.toggle_visible, default=True),
                 pystray.MenuItem("刷新", lambda: self.app.widget.refresh()),

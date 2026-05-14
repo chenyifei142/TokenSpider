@@ -24,18 +24,18 @@ C_BAR_BG   = "#2e2e4a"
 
 # ── base font sizes (scaled dynamically) ─────────────────────────
 # format: (family, size, *styles)
-BF_LABEL  = ("Segoe UI", 9)
-BF_VALUE  = ("Consolas", 11, "bold")
-BF_COST   = ("Consolas", 10, "bold")
+BF_LABEL  = ("Microsoft YaHei UI", 9)
+BF_VALUE  = ("Microsoft YaHei UI", 11, "bold")
+BF_COST   = ("Microsoft YaHei UI", 10, "bold")
 BF_TIME   = ("Consolas", 8)
-BF_TITLE  = ("Segoe UI", 14, "bold")
-BF_SECTION = ("Consolas", 10, "bold")
-BF_LABEL_L = ("Segoe UI", 11)
-BF_VALUE_L = ("Consolas", 13, "bold")
+BF_TITLE  = ("Microsoft YaHei UI", 14, "bold")
+BF_SECTION = ("Microsoft YaHei UI", 10, "bold")
+BF_LABEL_L = ("Microsoft YaHei UI", 11)
+BF_VALUE_L = ("Microsoft YaHei UI", 13, "bold")
 BF_TIME_L  = ("Consolas", 9)
 BF_MODEL   = ("Consolas", 9, "bold")
-BF_MODEL_V = ("Consolas", 9)
-BF_PCT     = ("Segoe UI", 11, "bold")
+BF_MODEL_V = ("Microsoft YaHei UI", 9)
+BF_PCT     = ("Microsoft YaHei UI", 11, "bold")
 
 # ── default dimensions (scale = 1.0) ─────────────────────────────
 DEF_COMPACT_W = 290
@@ -199,11 +199,11 @@ class FloatingWidget(tk.Tk):
         col_label = int(w * 0.10)
         col_cost  = w - int(w * 0.10)
 
-        # 3 data rows: Wallet, Today Cost, Week Cost
+        # 3 data rows: wallet balance, today cost, week cost
         data_rows = [
-            ("Wallet",     f"Y {d.balance_cny:.4f}",    C_ACCENT2, BF_COST),
-            ("Today Cost", f"Y {d.today_cost_cny:.4f}",  C_ACCENT2, BF_COST),
-            ("Week  Cost", f"Y {d.weekly_cost_cny:.4f}", C_ACCENT2, BF_COST),
+            ("钱包余额", f"￥ {d.balance_cny:.4f}",    C_ACCENT2, BF_COST),
+            ("今日费用", f"￥ {d.today_cost_cny:.4f}",  C_ACCENT2, BF_COST),
+            ("本周费用", f"￥ {d.weekly_cost_cny:.4f}", C_ACCENT2, BF_COST),
         ]
         row_step = int(h * 0.17)
         row_start = int(h * 0.09)
@@ -220,8 +220,8 @@ class FloatingWidget(tk.Tk):
         bar_h = max(5, int(h * 0.045))
         bar_left = int(w * 0.10)
 
-        c.create_text(bar_left, bar_y - int(h * 0.05), text="budget",
-                      fill=C_TIME, font=s(("Segoe UI", 6)), anchor="w")
+        c.create_text(bar_left, bar_y - int(h * 0.05), text="预算",
+                      fill=C_TIME, font=s(("Microsoft YaHei UI", 7)), anchor="w")
 
         self._draw_bar(c, bar_left, bar_y, w - bar_left, bar_y + bar_h, pct)
         c.create_text(w - bar_left, bar_y - int(h * 0.05),
@@ -229,7 +229,7 @@ class FloatingWidget(tk.Tk):
                       font=s(("Consolas", 7, "bold")), anchor="e")
 
         c.create_text(w // 2, h - int(h * 0.06),
-                      text=f"updated  {d.last_updated}",
+                      text=f"更新于  {d.last_updated}",
                       fill=C_TIME, font=s(("Consolas", 7)))
 
     def _show_compact(self):
@@ -269,7 +269,7 @@ class FloatingWidget(tk.Tk):
 
         # ── Budget gauge ──
         gauge_y = int(h * 0.096)
-        c.create_text(28, gauge_y, text="BUDGET", fill=C_ACCENT,
+        c.create_text(28, gauge_y, text="预算", fill=C_ACCENT,
                       font=s(BF_SECTION), anchor="w")
 
         bar_x1, bar_x2 = 28, w - 28
@@ -287,15 +287,15 @@ class FloatingWidget(tk.Tk):
         # ── Summary rows ──
         sum_y = gauge_y + int(h * 0.090)
         c.create_line(24, sum_y, w - 24, sum_y, fill=C_BORDER, width=1)
-        c.create_text(28, sum_y + int(h * 0.024), text="SUMMARY",
+        c.create_text(28, sum_y + int(h * 0.024), text="汇总",
                       fill=C_ACCENT, font=s(BF_SECTION), anchor="w")
 
         self._stat_rows = []
         labels = [
-            "Wallet", "Avail Tokens",
-            "Today  Cost", "Today  Tokens",
-            "Week   Cost", "Week   Tokens",
-            "Month Cost",  "Month Tokens",
+            "钱包余额", "可用 Token",
+            "今日费用", "今日 Token",
+            "本周费用", "本周 Token",
+            "本月费用", "本月 Token",
         ]
         keys = [
             "balance_cny", "balance_tokens",
@@ -304,10 +304,10 @@ class FloatingWidget(tk.Tk):
             "monthly_cost_cny", "monthly_usage_tokens",
         ]
         fmts = [
-            lambda v: f"Y {v:.4f}", lambda v: f"{v:,}",
-            lambda v: f"Y {v:.4f}", lambda v: f"{v:,}",
-            lambda v: f"Y {v:.4f}", lambda v: f"{v:,}",
-            lambda v: f"Y {v:.4f}", lambda v: f"{v:,}",
+            lambda v: f"￥ {v:.4f}", lambda v: f"{v:,}",
+            lambda v: f"￥ {v:.4f}", lambda v: f"{v:,}",
+            lambda v: f"￥ {v:.4f}", lambda v: f"{v:,}",
+            lambda v: f"￥ {v:.4f}", lambda v: f"{v:,}",
         ]
         row_step = int(h * 0.044)
         row_h    = int(h * 0.036)
@@ -326,7 +326,7 @@ class FloatingWidget(tk.Tk):
         # ── Model breakdown ──
         model_y = row_start + 8 * row_step + int(h * 0.022)
         c.create_line(24, model_y, w - 24, model_y, fill=C_BORDER, width=1)
-        c.create_text(28, model_y + int(h * 0.024), text="MODELS",
+        c.create_text(28, model_y + int(h * 0.024), text="模型",
                       fill=C_ACCENT, font=s(BF_SECTION), anchor="w")
 
         self._model_rows = []
@@ -346,10 +346,10 @@ class FloatingWidget(tk.Tk):
             c.create_text(32, ry + int(m_row_h * 0.22), text=name,
                           fill=color, font=s(BF_MODEL), anchor="w")
             tk_lbl = c.create_text(32, ry + int(m_row_h * 0.62),
-                                   text="tk  --", fill=C_SUBTEXT,
+                                   text="Token  --", fill=C_SUBTEXT,
                                    font=s(BF_MODEL_V), anchor="w")
             co_lbl = c.create_text(w - 32, ry + int(m_row_h * 0.62),
-                                   text="Y  --", fill=C_ACCENT2,
+                                   text="￥  --", fill=C_ACCENT2,
                                    font=s(BF_MODEL_V), anchor="e")
             self._model_rows.append((name, color, tk_lbl, co_lbl))
 
@@ -366,14 +366,14 @@ class FloatingWidget(tk.Tk):
         btn = _round_rect(c, btn_x1, bot_y, btn_x2, bot_y + int(h * 0.031), 11,
                           fill=C_ACCENT, outline="")
         btn_txt = c.create_text(btn_mid, bot_y + int(h * 0.016),
-                                text="refresh", fill="white",
-                                font=s(("Consolas", 9, "bold")))
+                                text="刷新", fill="white",
+                                font=s(("Microsoft YaHei UI", 9, "bold")))
         c.tag_bind(btn,     "<Button-1>", lambda e: self.refresh())
         c.tag_bind(btn_txt, "<Button-1>", lambda e: self.refresh())
 
         c.create_text(w // 2, h - int(h * 0.016),
-                      text="drag to move  |  click to fold",
-                      fill="#5a5a78", font=(self._s(BF_TIME)[0], max(5, int(7 * self._scale))))
+                      text="拖动移动  |  点击收起",
+                      fill="#5a5a78", font=("Microsoft YaHei UI", max(5, int(7 * self._scale))))
 
     # ================================================================
     #  Data update  (fonts unchanged, only values)
@@ -391,7 +391,7 @@ class FloatingWidget(tk.Tk):
         self._draw_gauge(c, x1, y1, x2, y2, pct)
         c.itemconfigure(self._gauge_pct_id, text=f"{pct:.1f}%", fill=color)
         c.itemconfigure(self._gauge_sub_id,
-                        text=f"remaining Y {d.balance_cny:.4f}  /  total Y {total:.4f}")
+                        text=f"剩余 ￥ {d.balance_cny:.4f}  /  总计 ￥ {total:.4f}")
 
         for key, fmt, vid in self._stat_rows:
             val = getattr(d, key, 0)
@@ -420,10 +420,10 @@ class FloatingWidget(tk.Tk):
             return total
 
         for name, color, tk_lbl, co_lbl in self._model_rows:
-            c.itemconfigure(tk_lbl, text=f"tk  {self._fmt_num(_model_tokens(name))}")
-            c.itemconfigure(co_lbl, text=f"Y  {_model_cost(name):.4f}")
+            c.itemconfigure(tk_lbl, text=f"Token  {self._fmt_num(_model_tokens(name))}")
+            c.itemconfigure(co_lbl, text=f"￥  {_model_cost(name):.4f}")
 
-        c.itemconfigure(self._updated_id, text=f"updated  {d.last_updated}")
+        c.itemconfigure(self._updated_id, text=f"更新于  {d.last_updated}")
 
     def _draw_gauge(self, c, x1, y1, x2, y2, pct):
         c.delete("gauge")
@@ -547,10 +547,10 @@ class FloatingWidget(tk.Tk):
                        bg=C_CARD, fg=C_TEXT,
                        activebackground=C_ACCENT, activeforeground="white",
                        relief="flat", bd=0)
-        menu.add_command(label="Refresh", command=self.refresh)
-        menu.add_command(label="Expand / Collapse", command=self.toggle)
+        menu.add_command(label="刷新", command=self.refresh)
+        menu.add_command(label="展开/收起", command=self.toggle)
         menu.add_separator()
-        menu.add_command(label="Quit", command=self.tray.quit_app)
+        menu.add_command(label="退出", command=self.tray.quit_app)
         menu.post(event.x_root, event.y_root)
 
     def _on_hover(self, entering: bool):
