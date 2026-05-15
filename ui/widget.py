@@ -1,10 +1,12 @@
 """Floating widget -- auto-scaling UI with budget gauge, model details."""
 
+import math
 import tkinter as tk
 import threading
 
-from config import REFRESH_INTERVAL
+import config_manager
 from data.store import TokenData
+from ui.settings import SettingsWindow
 
 # ── palette ──────────────────────────────────────────────────────
 C_MASK     = "#010101"
@@ -21,6 +23,8 @@ C_GREEN    = "#00d4aa"
 C_YELLOW   = "#f0c040"
 C_RED      = "#f05050"
 C_BAR_BG   = "#2e2e4a"
+C_WATER    = "#5f6ff6"
+C_WATER_TOP = "#00d4aa"
 
 # ── base font sizes (scaled dynamically) ─────────────────────────
 # format: (family, size, *styles)
@@ -38,14 +42,13 @@ BF_MODEL_V = ("Microsoft YaHei UI", 9)
 BF_PCT     = ("Microsoft YaHei UI", 11, "bold")
 
 # ── default dimensions (scale = 1.0) ─────────────────────────────
-DEF_COMPACT_W = 290
-DEF_COMPACT_H = 120
 DEF_EXPAND_W  = 390
 DEF_EXPAND_H  = 710
+DEF_BALL_SIZE = 72
 R_CARD_SM = 22
 R_CARD_LG = 24
 R_ROW     = 10
-MIN_W, MIN_H = 200, 70
+MIN_W, MIN_H = 280, 360
 
 
 def _round_rect(c, x1, y1, x2, y2, r, **kw):
@@ -77,15 +80,21 @@ class FloatingWidget(tk.Tk):
         self._resize_orig_h = 0
         self._resize_orig_win_x = 0
         self._resize_orig_win_y = 0
-        self._win_w = DEF_COMPACT_W
-        self._win_h = DEF_COMPACT_H
+        self._win_w = self._compact_size()
+        self._win_h = self._compact_size()
         self._scale = 1.0
+        self._wave_phase = 0.0
+        self._refresh_after_id = None
+        self._settings_window = None
+        self._suppress_toggle = False
+        self._sync_theme()
 
         self._setup_window()
         self._build_compact()
         self._build_expanded()
         self._show_compact()
         self._start_refresh()
+        self._animate_wave()
 
     # ================================================================
     #  Font scaling
@@ -94,9 +103,9 @@ class FloatingWidget(tk.Tk):
     def _update_scale(self):
         """Recalc scale factor based on current vs default dimensions."""
         if self._expanded:
-            dw, dh = DEF_EXPAND_W, DEF_EXPAND_H
+            dw, dh = self._expanded_size()
         else:
-            dw, dh = DEF_COMPACT_W, DEF_COMPACT_H
+            dw = dh = self._compact_size()
         sx = self._win_w / dw if dw else 1
         sy = self._win_h / dh if dh else 1
         self._scale = max(0.45, min(2.0, min(sx, sy)))
@@ -110,6 +119,24 @@ class FloatingWidget(tk.Tk):
     # ================================================================
     #  Helpers
     # ================================================================
+
+    @staticmethod
+    def _compact_size() -> int:
+        return int(config_manager.get("WIDGET_COMPACT_SIZE", DEF_BALL_SIZE))
+
+    @staticmethod
+    def _expanded_size() -> tuple[int, int]:
+        size = config_manager.get("WIDGET_EXPANDED_SIZE", (DEF_EXPAND_W, DEF_EXPAND_H))
+        return int(size[0]), int(size[1])
+
+    @staticmethod
+    def _sync_theme():
+        global C_CARD, C_ACCENT, C_TEXT, C_WATER, C_WATER_TOP
+        C_CARD = config_manager.get("BG_COLOR", C_CARD)
+        C_ACCENT = config_manager.get("ACCENT_COLOR", C_ACCENT)
+        C_TEXT = config_manager.get("TEXT_COLOR", C_TEXT)
+        C_WATER = C_ACCENT
+        C_WATER_TOP = C_ACCENT2
 
     @staticmethod
     def _fmt_num(n: int) -> str:
@@ -154,10 +181,11 @@ class FloatingWidget(tk.Tk):
     def _setup_window(self):
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        x = self.winfo_screenwidth() - DEF_COMPACT_W - 24
-        self.geometry(f"{DEF_COMPACT_W}x{DEF_COMPACT_H}+{x}+40")
+        size = self._compact_size()
+        x = self.winfo_screenwidth() - size - 12
+        self.geometry(f"{size}x{size}+{x}+90")
         self.configure(bg=C_MASK)
-        self.attributes("-alpha", 0.94)
+        self.attributes("-alpha", 0.88)
         try:
             self.attributes("-transparentcolor", C_MASK)
         except Exception:
@@ -171,7 +199,7 @@ class FloatingWidget(tk.Tk):
         self.bind("<Leave>",           lambda e: self._on_hover(False))
 
     # ================================================================
-    #  Compact card
+    #  Floating ball
     # ================================================================
 
     def _build_compact(self):
@@ -184,57 +212,54 @@ class FloatingWidget(tk.Tk):
         c.delete("all")
         w, h = self._win_w, self._win_h
         self._update_scale()
-        s = self._s
         c.configure(width=w, height=h)
-
-        # Glow + card bg
-        _round_rect(c, 0, 0, w, h, R_CARD_SM,
-                    fill="", outline=C_GLOW, width=3)
-        _round_rect(c, 2, 2, w - 2, h - 2, R_CARD_SM - 2,
-                    fill=C_CARD, outline=C_BORDER, width=1)
 
         pct = self._remaining_pct()
         d = self._data
+        cx, cy = w / 2, h / 2
+        r = min(w, h) / 2 - 5
+        x1, y1, x2, y2 = cx - r, cy - r, cx + r, cy + r
 
-        col_label = int(w * 0.10)
-        col_cost  = w - int(w * 0.10)
+        c.create_oval(x1 - 3, y1 - 3, x2 + 3, y2 + 3, fill="", outline=C_GLOW, width=3)
+        c.create_oval(x1, y1, x2, y2, fill=C_CARD, outline=C_BORDER, width=1)
+        self._draw_water_ball(c, cx, cy, r, pct)
 
-        # 3 data rows: wallet balance, today cost, week cost
-        data_rows = [
-            ("钱包余额", f"￥ {d.balance_cny:.4f}",    C_ACCENT2, BF_COST),
-            ("今日费用", f"￥ {d.today_cost_cny:.4f}",  C_ACCENT2, BF_COST),
-            ("本周费用", f"￥ {d.weekly_cost_cny:.4f}", C_ACCENT2, BF_COST),
-        ]
-        row_step = int(h * 0.17)
-        row_start = int(h * 0.09)
+        c.create_oval(x1 + 7, y1 + 6, x1 + r * 0.76, y1 + r * 0.55,
+                      fill="#ffffff", outline="", stipple="gray75")
+        c.create_text(cx, cy - 3, text=f"{pct:.0f}%",
+                      fill="white", font=("Consolas", max(11, int(w * 0.19)), "bold"))
+        c.create_text(cx, cy + max(15, int(h * 0.22)),
+                      text=f"￥{d.balance_cny:.2f}",
+                      fill=C_TEXT, font=("Microsoft YaHei UI", max(7, int(w * 0.12)), "bold"))
 
-        for i, (label, val_str, color, font) in enumerate(data_rows):
-            y = row_start + i * row_step + row_step // 2
-            c.create_text(col_label, y, text=label,
-                          fill=C_SUBTEXT, font=s(BF_LABEL), anchor="w")
-            c.create_text(col_cost, y, text=val_str,
-                          fill=color, font=s(font), anchor="e")
+    def _draw_water_ball(self, c, cx, cy, r, pct):
+        water_top = cy + r - (2 * r * max(0, min(pct, 100)) / 100)
+        amp = max(2, r * 0.06)
+        step = 2
+        for yy in range(int(water_top), int(cy + r) + 1, step):
+            dy = yy - cy
+            half = math.sqrt(max(0, r * r - dy * dy))
+            c.create_line(cx - half, yy, cx + half, yy, fill=C_WATER, width=step + 1)
 
-        # Bar section
-        bar_y = row_start + len(data_rows) * row_step + int(h * 0.12)
-        bar_h = max(5, int(h * 0.045))
-        bar_left = int(w * 0.10)
-
-        c.create_text(bar_left, bar_y - int(h * 0.05), text="预算",
-                      fill=C_TIME, font=s(("Microsoft YaHei UI", 7)), anchor="w")
-
-        self._draw_bar(c, bar_left, bar_y, w - bar_left, bar_y + bar_h, pct)
-        c.create_text(w - bar_left, bar_y - int(h * 0.05),
-                      text=f"{pct:.0f}%", fill=self._bar_color(pct),
-                      font=s(("Consolas", 7, "bold")), anchor="e")
-
-        c.create_text(w // 2, h - int(h * 0.06),
-                      text=f"更新于  {d.last_updated}",
-                      fill=C_TIME, font=s(("Consolas", 7)))
+        points = []
+        start = int(cx - r)
+        end = int(cx + r)
+        for xx in range(start, end + 1, 3):
+            dx = xx - cx
+            limit = math.sqrt(max(0, r * r - dx * dx))
+            y = water_top + math.sin((xx / 9.0) + self._wave_phase) * amp
+            y = max(cy - limit, min(cy + limit, y))
+            points.append((xx, y))
+        if len(points) > 1:
+            flat = [coord for point in points for coord in point]
+            c.create_line(*flat, fill=C_WATER_TOP, width=2, smooth=True)
 
     def _show_compact(self):
         if hasattr(self, '_expanded_canvas') and self._expanded_canvas.winfo_ismapped():
             self._expanded_canvas.pack_forget()
+        size = self._compact_size()
+        self._win_w = size
+        self._win_h = size
         self._compact_canvas.pack(fill="both", expand=True)
         self.geometry(f"{self._win_w}x{self._win_h}")
 
@@ -361,6 +386,16 @@ class FloatingWidget(tk.Tk):
             32, bot_y + int(h * 0.017), text="",
             fill=C_TIME, font=s(BF_TIME_L), anchor="w")
 
+        set_x1, set_x2 = w - 180, w - 104
+        set_mid = (set_x1 + set_x2) // 2
+        settings_btn = _round_rect(c, set_x1, bot_y, set_x2, bot_y + int(h * 0.031), 11,
+                                   fill="#34345a", outline="")
+        settings_txt = c.create_text(set_mid, bot_y + int(h * 0.016),
+                                     text="设置", fill="white",
+                                     font=s(("Microsoft YaHei UI", 9, "bold")))
+        c.tag_bind(settings_btn, "<Button-1>", lambda e: self._run_canvas_action(self.open_settings))
+        c.tag_bind(settings_txt, "<Button-1>", lambda e: self._run_canvas_action(self.open_settings))
+
         btn_x1, btn_x2 = w - 96, w - 20
         btn_mid = (btn_x1 + btn_x2) // 2
         btn = _round_rect(c, btn_x1, bot_y, btn_x2, bot_y + int(h * 0.031), 11,
@@ -368,8 +403,8 @@ class FloatingWidget(tk.Tk):
         btn_txt = c.create_text(btn_mid, bot_y + int(h * 0.016),
                                 text="刷新", fill="white",
                                 font=s(("Microsoft YaHei UI", 9, "bold")))
-        c.tag_bind(btn,     "<Button-1>", lambda e: self.refresh())
-        c.tag_bind(btn_txt, "<Button-1>", lambda e: self.refresh())
+        c.tag_bind(btn,     "<Button-1>", lambda e: self._run_canvas_action(self.refresh))
+        c.tag_bind(btn_txt, "<Button-1>", lambda e: self._run_canvas_action(self.refresh))
 
         c.create_text(w // 2, h - int(h * 0.016),
                       text="拖动移动  |  点击收起",
@@ -451,6 +486,8 @@ class FloatingWidget(tk.Tk):
     # ================================================================
 
     def _edge_from_xy(self, x, y):
+        if not self._expanded:
+            return None
         w, h = self._win_w, self._win_h
         e = self.EDGE_WIDTH
         l, r, t, b = x <= e, x >= w - e, y <= e, y >= h - e
@@ -493,6 +530,8 @@ class FloatingWidget(tk.Tk):
         if self._resize_edge:
             self._resize_edge = None
             self.configure(cursor="arrow")
+        elif self._suppress_toggle:
+            self._suppress_toggle = False
         elif not self._drag_started:
             self.toggle()
         self._drag_started = False
@@ -549,6 +588,7 @@ class FloatingWidget(tk.Tk):
                        relief="flat", bd=0)
         menu.add_command(label="刷新", command=self.refresh)
         menu.add_command(label="展开/收起", command=self.toggle)
+        menu.add_command(label="设置", command=self.open_settings)
         menu.add_separator()
         menu.add_command(label="退出", command=self.tray.quit_app)
         menu.post(event.x_root, event.y_root)
@@ -556,18 +596,40 @@ class FloatingWidget(tk.Tk):
     def _on_hover(self, entering: bool):
         self._hover = entering
         if not self._expanded:
-            self.attributes("-alpha", 0.98 if entering else 0.85)
+            self.attributes("-alpha", 0.96 if entering else 0.76)
 
     def toggle(self):
         if self._expanded:
             self._expanded = False
-            self._win_w, self._win_h = DEF_COMPACT_W, DEF_COMPACT_H
             self._show_compact()
             self._draw_compact()
         else:
             self._expanded = True
-            self._win_w, self._win_h = DEF_EXPAND_W, DEF_EXPAND_H
+            self._win_w, self._win_h = self._expanded_size()
             self._show_expanded()
+
+    def open_settings(self):
+        if self._settings_window and self._settings_window.winfo_exists():
+            self._settings_window.lift()
+            self._settings_window.focus_force()
+            return
+        self._settings_window = SettingsWindow(self, on_saved=self._on_config_saved)
+
+    def _run_canvas_action(self, action):
+        self._suppress_toggle = True
+        action()
+
+    def _on_config_saved(self):
+        config_manager.load_config()
+        self._sync_theme()
+        if self._expanded:
+            self._win_w, self._win_h = self._expanded_size()
+            self._show_expanded()
+        else:
+            self._show_compact()
+            self._draw_compact()
+        self.refresh()
+        self._reschedule_refresh()
 
     # ================================================================
     #  Data refresh
@@ -586,8 +648,20 @@ class FloatingWidget(tk.Tk):
 
     def _start_refresh(self):
         self.refresh()
-        self.after(REFRESH_INTERVAL, self._periodic_refresh)
+        self._reschedule_refresh()
 
     def _periodic_refresh(self):
         self.refresh()
-        self.after(REFRESH_INTERVAL, self._periodic_refresh)
+        self._reschedule_refresh()
+
+    def _reschedule_refresh(self):
+        if self._refresh_after_id:
+            self.after_cancel(self._refresh_after_id)
+        interval = int(config_manager.get("REFRESH_INTERVAL", 60_000))
+        self._refresh_after_id = self.after(interval, self._periodic_refresh)
+
+    def _animate_wave(self):
+        if not self._expanded:
+            self._wave_phase += 0.22
+            self._draw_compact()
+        self.after(90, self._animate_wave)

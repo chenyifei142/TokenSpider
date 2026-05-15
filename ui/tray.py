@@ -34,7 +34,8 @@ class SystemTray:
             "TokenSpider - LLM 用量监控",
             menu=pystray.Menu(
                 pystray.MenuItem("显示/隐藏", self.toggle_visible, default=True),
-                pystray.MenuItem("刷新", lambda: self.app.widget.refresh()),
+                pystray.MenuItem("刷新", self.refresh),
+                pystray.MenuItem("设置", self.open_settings),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("退出", self.quit_app),
             ),
@@ -42,15 +43,25 @@ class SystemTray:
 
     def toggle_visible(self):
         w = self.app.widget
+        w.after(0, self._toggle_visible)
+
+    def _toggle_visible(self):
+        w = self.app.widget
         if w.winfo_viewable():
             w.withdraw()
-        else:
-            w.deiconify()
-            w.lift()
+            return
+        w.deiconify()
+        w.lift()
+
+    def refresh(self):
+        self.app.widget.after(0, self.app.widget.refresh)
+
+    def open_settings(self):
+        self.app.widget.after(0, self.app.widget.open_settings)
 
     def quit_app(self):
         self.icon.stop()
-        self.app.widget.destroy()
+        self.app.widget.after(0, self.app.widget.destroy)
 
     def run(self):
         threading.Thread(target=self.icon.run, daemon=True).start()

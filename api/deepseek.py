@@ -1,28 +1,33 @@
 """DeepSeek platform API client."""
 
 import requests
-from config import DEEPSEEK_BASE, DEEPSEEK_AUTH, DEEPSEEK_COOKIE
 
-HEADERS = {
-    "accept": "*/*",
-    "accept-language": "zh-CN,zh;q=0.9",
-    "authorization": DEEPSEEK_AUTH,
-    "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "x-app-version": "20240425.0",
-    "referer": "https://platform.deepseek.com/usage",
-    "cookie": DEEPSEEK_COOKIE,
-    "user-agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/147.0.0.0 Safari/537.36"
-    ),
-}
+import config_manager
+
+
+def _headers() -> dict:
+    base = config_manager.get("DEEPSEEK_BASE", "https://platform.deepseek.com")
+    return {
+        "accept": "*/*",
+        "accept-language": "zh-CN,zh;q=0.9",
+        "authorization": config_manager.get("DEEPSEEK_AUTH", ""),
+        "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "x-app-version": "20240425.0",
+        "referer": f"{base}/usage",
+        "cookie": config_manager.get("DEEPSEEK_COOKIE", ""),
+        "user-agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/147.0.0.0 Safari/537.36"
+        ),
+    }
 
 
 def _get(path: str) -> dict:
-    r = requests.get(f"{DEEPSEEK_BASE}{path}", headers=HEADERS, timeout=15)
+    base = config_manager.get("DEEPSEEK_BASE", "https://platform.deepseek.com")
+    r = requests.get(f"{base}{path}", headers=_headers(), timeout=15)
     r.raise_for_status()
     return r.json()["data"]["biz_data"]
 

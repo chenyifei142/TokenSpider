@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 .claude/
 config.py
+dist
+.gitignore
+AGENTS.md
+TokenSpider.spec
+config.example.py
+.idea/
+build/

@@ -12,7 +12,6 @@ class App:
 
     def run(self):
         self.tray.run()
-        self.widget.attributes("-alpha", 0.65)
         self.widget.mainloop()
 
 
