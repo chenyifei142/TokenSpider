@@ -50,6 +50,10 @@ def sample_data() -> TokenData:
     )
 
 
+def center_global(widget) -> QPoint:
+    return widget.mapToGlobal(widget.rect().center())
+
+
 def test_token_axis_uses_readable_units():
     assert format_token_axis(0) == "0万"
     assert format_token_axis(1_500) == "0.15万"
@@ -186,6 +190,178 @@ def test_panel_uses_shared_glass_theme_and_fluent_action_buttons():
     assert all(not button.icon().isNull() for button in buttons)
     assert all(button.iconSize().width() == 18 for button in buttons)
     panel.close()
+
+
+def test_panel_restores_saved_layout_state():
+    saved_layout = {
+        "sections": ["bottom", "top", "middle"],
+        "top_cards": ["month", "today", "balance"],
+        "bottom_cards": ["statistics", "trend"],
+    }
+    with patch("ui.qt_panel.config_manager.load_panel_layout_state", return_value=saved_layout):
+        panel = MainPanel()
+
+    assert panel.layout_state() == saved_layout
+    panel.close()
+
+
+def test_invalid_drag_restores_original_order_without_persist():
+    with (
+        patch("ui.qt_panel.config_manager.load_panel_layout_state", return_value={}),
+        patch("ui.qt_panel.config_manager.save_panel_layout_state") as save_layout,
+    ):
+        panel = MainPanel()
+        panel.resize(820, 550)
+        panel.show()
+        APP.processEvents()
+
+        controller = panel._top_card_reorder
+        controller.REORDER_DURATION_MS = 0
+        controller.DROP_DURATION_MS = 0
+        start = center_global(panel.today_card.drag_handle)
+        reorder_target = panel.metrics_container.mapToGlobal(
+            QPoint(panel.metrics_container.width() - 4, panel.metrics_container.height() // 2)
+        )
+        invalid_target = panel.mapToGlobal(QPoint(-24, -24))
+
+        controller.start_drag("today", start)
+        controller.update_drag(reorder_target)
+        assert controller.order() == ["balance", "month", "today"]
+
+        controller.finish_drag(invalid_target)
+        APP.processEvents()
+        assert panel.layout_state()["top_cards"] == ["today", "balance", "month"]
+        save_layout.assert_not_called()
+        panel.close()
+
+
+def test_small_pointer_move_does_not_start_drag_or_persist():
+    with (
+        patch("ui.qt_panel.config_manager.load_panel_layout_state", return_value={}),
+        patch("ui.qt_panel.config_manager.save_panel_layout_state") as save_layout,
+    ):
+        panel = MainPanel()
+        panel.resize(820, 550)
+        panel.show()
+        APP.processEvents()
+
+        controller = panel._top_card_reorder
+        controller.REORDER_DURATION_MS = 0
+        controller.DROP_DURATION_MS = 0
+        start = center_global(panel.today_card.drag_handle)
+        near = start + QPoint(controller.DRAG_THRESHOLD - 1, 0)
+
+        controller.start_drag("today", start)
+        controller.update_drag(near)
+        controller.finish_drag(near)
+        APP.processEvents()
+
+        assert controller.order() == ["today", "balance", "month"]
+        assert not controller._drag_started
+        save_layout.assert_not_called()
+        panel.close()
+
+
+def test_inner_reorder_keeps_card_sizes_bound_to_card_type():
+    with patch("ui.qt_panel.config_manager.load_panel_layout_state", return_value={}):
+        panel = MainPanel()
+        panel.resize(820, 550)
+        panel.show()
+        APP.processEvents()
+
+        for controller in (panel._top_card_reorder, panel._bottom_card_reorder):
+            controller.REORDER_DURATION_MS = 0
+            controller.DROP_DURATION_MS = 0
+
+        top_widths_before = {
+            "today": panel.today_card.width(),
+            "balance": panel.balance_card.width(),
+            "month": panel.month_card.width(),
+        }
+        bottom_widths_before = {
+            "trend": panel.trend.width(),
+            "statistics": panel.statistics.width(),
+        }
+
+        top_target = panel.metrics_container.mapToGlobal(
+            QPoint(panel.metrics_container.width() - 4, panel.metrics_container.height() // 2)
+        )
+        bottom_target = panel.lower_container.mapToGlobal(
+            QPoint(4, panel.lower_container.height() // 2)
+        )
+
+        panel._top_card_reorder.start_drag("today", center_global(panel.today_card.drag_handle))
+        panel._top_card_reorder.update_drag(top_target)
+        panel._top_card_reorder.finish_drag(top_target)
+        APP.processEvents()
+
+        panel._bottom_card_reorder.start_drag("statistics", center_global(panel.statistics.drag_handle))
+        panel._bottom_card_reorder.update_drag(bottom_target)
+        panel._bottom_card_reorder.finish_drag(bottom_target)
+        APP.processEvents()
+
+        assert {panel.today_card.width(), panel.balance_card.width(), panel.month_card.width()} == {
+            top_widths_before["today"],
+            top_widths_before["balance"],
+            top_widths_before["month"],
+        }
+        assert panel.today_card.width() == top_widths_before["today"]
+        assert panel.balance_card.width() == top_widths_before["balance"]
+        assert panel.month_card.width() == top_widths_before["month"]
+        assert panel.trend.width() == bottom_widths_before["trend"]
+        assert panel.statistics.width() == bottom_widths_before["statistics"]
+        assert panel.trend.width() > panel.statistics.width()
+        panel.close()
+
+
+def test_dragged_layout_changes_persist_for_sections_and_cards():
+    with (
+        patch("ui.qt_panel.config_manager.load_panel_layout_state", return_value={}),
+        patch("ui.qt_panel.config_manager.save_panel_layout_state") as save_layout,
+    ):
+        panel = MainPanel()
+        panel.resize(820, 550)
+        panel.show()
+        APP.processEvents()
+
+        for controller in (panel._section_reorder, panel._top_card_reorder, panel._bottom_card_reorder):
+            controller.REORDER_DURATION_MS = 0
+            controller.DROP_DURATION_MS = 0
+
+        section_target = panel.sections_container.mapToGlobal(
+            QPoint(panel.sections_container.width() // 2, panel.sections_container.height() - 4)
+        )
+        panel._section_reorder.start_drag("top", center_global(panel.top_section.drag_handle))
+        panel._section_reorder.update_drag(section_target)
+        panel._section_reorder.finish_drag(section_target)
+        APP.processEvents()
+        saved_after_section = save_layout.call_count
+
+        top_card_target = panel.metrics_container.mapToGlobal(
+            QPoint(panel.metrics_container.width() - 4, panel.metrics_container.height() // 2)
+        )
+        bottom_card_target = panel.lower_container.mapToGlobal(
+            QPoint(4, panel.lower_container.height() // 2)
+        )
+
+        panel._top_card_reorder.start_drag("today", center_global(panel.today_card.drag_handle))
+        panel._top_card_reorder.update_drag(top_card_target)
+        assert save_layout.call_count == saved_after_section
+        panel._top_card_reorder.finish_drag(top_card_target)
+        APP.processEvents()
+
+        panel._bottom_card_reorder.start_drag("statistics", center_global(panel.statistics.drag_handle))
+        panel._bottom_card_reorder.update_drag(bottom_card_target)
+        panel._bottom_card_reorder.finish_drag(bottom_card_target)
+        APP.processEvents()
+
+        assert panel.layout_state() == {
+            "sections": ["middle", "bottom", "top"],
+            "top_cards": ["balance", "month", "today"],
+            "bottom_cards": ["statistics", "trend"],
+        }
+        assert save_layout.call_args_list[-1].args[0] == panel.layout_state()
+        panel.close()
 
 
 def test_expanded_window_hides_ball_and_uses_compact_panel_size():

@@ -81,6 +81,24 @@ class ConfigTests(unittest.TestCase):
             finally:
                 config_manager._config = old_config
 
+    def test_panel_layout_state_round_trips_separately(self):
+        temp_root = Path.cwd() / ".test-appdata" / "tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temp_root) as directory:
+            layout_path = Path(directory) / "panel-layout.json"
+            payload = {
+                "sections": ["bottom", "top", "middle"],
+                "top_cards": ["month", "today", "balance"],
+                "bottom_cards": ["statistics", "trend"],
+            }
+
+            with patch.object(config_manager, "PANEL_LAYOUT_PATH", layout_path):
+                config_manager.save_panel_layout_state(payload)
+                self.assertEqual(config_manager.load_panel_layout_state(), payload)
+
+                layout_path.write_text("[]", encoding="utf-8")
+                self.assertEqual(config_manager.load_panel_layout_state(), {})
+
 
 if __name__ == "__main__":
     unittest.main()

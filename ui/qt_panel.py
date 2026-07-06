@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from typing import Callable
 
 import pyqtgraph as pg
-from PySide6.QtCore import QPoint, QSize, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QRect, QSize, Qt, QPropertyAnimation, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QGradient, QLinearGradient, QPainter
 from PySide6.QtWidgets import (
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QScrollArea,
@@ -20,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import config_manager
 from data.store import TokenData
 from ui.activity import compact_tokens
 from ui.qt_heatmap import TokenActivityHeatmap
@@ -147,10 +150,420 @@ class StatusDot(QWidget):
         painter.end()
 
 
+PANEL_LAYOUT_DEFAULTS = {
+    "sections": ["top", "middle", "bottom"],
+    "top_cards": ["today", "balance", "month"],
+    "bottom_cards": ["trend", "statistics"],
+}
+
+
+def _normalize_order(values: list[str] | tuple[str, ...] | None, expected: list[str]) -> list[str]:
+    if not isinstance(values, (list, tuple)):
+        return list(expected)
+    order = [str(value) for value in values]
+    return order if sorted(order) == sorted(expected) and len(order) == len(expected) else list(expected)
+
+
+def _normalize_panel_layout_state(values: dict | None) -> dict[str, list[str]]:
+    raw = values if isinstance(values, dict) else {}
+    return {
+        key: _normalize_order(raw.get(key), expected)
+        for key, expected in PANEL_LAYOUT_DEFAULTS.items()
+    }
+
+
+class GripHandle(QWidget):
+    pressed = Signal(QPoint)
+    dragged = Signal(QPoint)
+    released = Signal(QPoint)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setFixedSize(24, 18)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(6, 20, 40, 176))
+        painter.drawRoundedRect(self.rect(), 8, 8)
+        painter.setBrush(QColor(C_PALE_BLUE))
+        for column in range(2):
+            for row in range(3):
+                painter.drawEllipse(7 + column * 6, 4 + row * 4, 2, 2)
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.pressed.emit(event.globalPosition().toPoint())
+            event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self.dragged.emit(event.globalPosition().toPoint())
+            event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            self.released.emit(event.globalPosition().toPoint())
+            event.accept()
+
+
+class PanelSection(QWidget):
+    def __init__(self, content: QWidget, tooltip: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(content)
+        self.drag_handle = GripHandle(self)
+        self.drag_handle.setToolTip(tooltip)
+        self.drag_handle.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.drag_handle.raise_()
+        self.drag_handle.move(max(6, self.width() - self.drag_handle.width() - 10), 8)
+
+
+class ReorderArea(QWidget):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._controller: ReorderController | None = None
+
+    def set_controller(self, controller: "ReorderController") -> None:
+        self._controller = controller
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._controller is not None:
+            self._controller.relayout(animated=False)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._controller is not None:
+            self._controller.relayout(animated=False)
+
+
+class DragPlaceholder(QFrame):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.hide()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setBrush(QColor(39, 103, 229, 18))
+        painter.setPen(QColor(102, 166, 255, 96))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 14, 14)
+        painter.end()
+
+
+class ReorderController:
+    DRAG_THRESHOLD = 6
+    HYSTERESIS = 8
+    REORDER_DURATION_MS = 180
+    DROP_DURATION_MS = 190
+
+    def __init__(
+        self,
+        container: QWidget,
+        orientation: Qt.Orientation,
+        expected_order: list[str],
+        persist_order: Callable[[list[str]], None],
+        slot_stretches: list[int] | None = None,
+        item_stretches: dict[str, int] | None = None,
+        spacing: int = SECTION_SPACING,
+    ):
+        self._container = container
+        self._orientation = orientation
+        self._expected_order = list(expected_order)
+        self._persist_order = persist_order
+        self._slot_stretches = list(slot_stretches or [])
+        self._item_stretches = {str(key): int(value) for key, value in (item_stretches or {}).items()}
+        self._spacing = spacing
+        self._widgets: dict[str, QWidget] = {}
+        self._order = list(expected_order)
+        self._drag_item_id = ""
+        self._drag_origin = QPoint()
+        self._drag_started = False
+        self._drag_original_order = list(expected_order)
+        self._drag_press_offset = QPoint()
+        self._drag_restore_rect = QRect()
+        self._animations: dict[QWidget, QPropertyAnimation] = {}
+        self._placeholder = DragPlaceholder(container)
+        self._placeholder_animation: QPropertyAnimation | None = None
+        self._shadow_effects: dict[QWidget, QGraphicsDropShadowEffect] = {}
+        if isinstance(container, ReorderArea):
+            container.set_controller(self)
+
+    def register_item(self, item_id: str, widget: QWidget, handle: GripHandle) -> None:
+        widget.setParent(self._container)
+        widget.show()
+        self._widgets[item_id] = widget
+        handle.pressed.connect(lambda point, current=item_id: self.start_drag(current, point))
+        handle.dragged.connect(self.update_drag)
+        handle.released.connect(self.finish_drag)
+
+    def order(self) -> list[str]:
+        return list(self._order)
+
+    def set_order(self, order: list[str], persist: bool = False) -> None:
+        self._order = _normalize_order(order, self._expected_order)
+        self.relayout(animated=False)
+        if persist:
+            self._persist_order(self.order())
+
+    def start_drag(self, item_id: str, point: QPoint) -> None:
+        if item_id not in self._widgets:
+            return
+        self._stop_animation(self._widgets[item_id])
+        self._drag_item_id = item_id
+        self._drag_origin = QPoint(point)
+        self._drag_started = False
+        self._drag_original_order = self.order()
+        widget = self._widgets[item_id]
+        self._drag_restore_rect = QRect(widget.geometry())
+        self._drag_press_offset = point - widget.mapToGlobal(widget.rect().topLeft())
+
+    def update_drag(self, point: QPoint) -> None:
+        if not self._drag_item_id:
+            return
+        if not self._drag_started and (point - self._drag_origin).manhattanLength() < self.DRAG_THRESHOLD:
+            return
+        if not self._drag_started:
+            self._begin_drag()
+        self._move_dragged_widget(point)
+        self._update_reorder_target()
+
+    def finish_drag(self, point: QPoint) -> None:
+        if not self._drag_item_id:
+            return
+        inside = self._container.rect().contains(self._container.mapFromGlobal(point))
+        if not self._drag_started:
+            self._reset_drag_state()
+            return
+        if not inside:
+            self._order = list(self._drag_original_order)
+            self.relayout(animated=True)
+        final_rect = self._slot_rects(self._order)[self._drag_item_id]
+        should_persist = inside and self._order != self._drag_original_order
+        self._animate_widget_geometry(
+            self._widgets[self._drag_item_id],
+            final_rect,
+            self.DROP_DURATION_MS,
+            self._complete_drag(should_persist),
+        )
+        self._animate_placeholder(final_rect)
+        self._placeholder.show()
+
+    def relayout(self, animated: bool) -> None:
+        if not self._widgets:
+            return
+        slot_rects = self._slot_rects(self._order)
+        for item_id, widget in self._widgets.items():
+            if self._drag_started and item_id == self._drag_item_id:
+                continue
+            target = slot_rects[item_id]
+            if animated:
+                self._animate_widget_geometry(widget, target, self.REORDER_DURATION_MS)
+            else:
+                self._stop_animation(widget)
+                widget.setGeometry(target)
+        if self._drag_started and self._drag_item_id:
+            placeholder_rect = slot_rects[self._drag_item_id]
+            if self._placeholder.isHidden():
+                self._placeholder.setGeometry(placeholder_rect)
+            else:
+                self._animate_placeholder(placeholder_rect)
+
+    def _begin_drag(self) -> None:
+        self._drag_started = True
+        widget = self._widgets[self._drag_item_id]
+        widget.raise_()
+        effect = self._shadow_effects.get(widget)
+        if effect is None:
+            effect = QGraphicsDropShadowEffect(widget)
+            effect.setBlurRadius(24)
+            effect.setOffset(0, 8)
+            effect.setColor(QColor(10, 28, 54, 128))
+            self._shadow_effects[widget] = effect
+        widget.setGraphicsEffect(effect)
+        slot_rect = self._slot_rects(self._order)[self._drag_item_id]
+        self._placeholder.setGeometry(slot_rect)
+        self._placeholder.show()
+
+    def _move_dragged_widget(self, point: QPoint) -> None:
+        widget = self._widgets[self._drag_item_id]
+        top_left = self._container.mapFromGlobal(point - self._drag_press_offset)
+        widget.setGeometry(self._drag_geometry(top_left))
+
+    def _update_reorder_target(self) -> None:
+        moved = False
+        while True:
+            current_index = self._order.index(self._drag_item_id)
+            current_rects = self._slot_rects(self._order)
+            drag_center = self._widgets[self._drag_item_id].geometry().center()
+            drag_axis = drag_center.x() if self._orientation == Qt.Orientation.Horizontal else drag_center.y()
+
+            if current_index > 0:
+                previous_id = self._order[current_index - 1]
+                previous_center = current_rects[previous_id].center()
+                previous_axis = (
+                    previous_center.x()
+                    if self._orientation == Qt.Orientation.Horizontal
+                    else previous_center.y()
+                )
+                if drag_axis < previous_axis - self.HYSTERESIS:
+                    self._order[current_index - 1], self._order[current_index] = (
+                        self._order[current_index],
+                        self._order[current_index - 1],
+                    )
+                    moved = True
+                    continue
+            if current_index < len(self._order) - 1:
+                next_id = self._order[current_index + 1]
+                next_center = current_rects[next_id].center()
+                next_axis = (
+                    next_center.x()
+                    if self._orientation == Qt.Orientation.Horizontal
+                    else next_center.y()
+                )
+                if drag_axis > next_axis + self.HYSTERESIS:
+                    self._order[current_index], self._order[current_index + 1] = (
+                        self._order[current_index + 1],
+                        self._order[current_index],
+                    )
+                    moved = True
+                    continue
+            break
+        if moved:
+            self.relayout(animated=True)
+
+    def _slot_rects(self, order: list[str]) -> dict[str, QRect]:
+        count = len(order)
+        if count == 0:
+            return {}
+        if self._orientation == Qt.Orientation.Horizontal:
+            return self._horizontal_slot_rects(order)
+        return self._vertical_slot_rects(order)
+
+    def _horizontal_slot_rects(self, order: list[str]) -> dict[str, QRect]:
+        available_width = max(1, self._container.width() - self._spacing * (len(order) - 1))
+        height = self._container.height()
+        if self._item_stretches:
+            stretches = [max(1, self._item_stretches.get(item_id, 1)) for item_id in order]
+        else:
+            stretches = self._slot_stretches or [1] * len(order)
+        total = max(1, sum(stretches[: len(order)]))
+        unit = available_width // total
+        if unit > 0:
+            widths = [stretch * unit for stretch in stretches[: len(order)]]
+            x = (available_width - sum(widths)) // 2
+        else:
+            widths = []
+            used = 0
+            for index, stretch in enumerate(stretches[: len(order)]):
+                if index == len(order) - 1:
+                    width = available_width - used
+                else:
+                    width = round(available_width * stretch / total)
+                    width = min(width, available_width - used)
+                widths.append(width)
+                used += width
+            x = 0
+        rects: dict[str, QRect] = {}
+        for item_id, width in zip(order, widths):
+            rects[item_id] = QRect(x, 0, width, height)
+            x += width + self._spacing
+        return rects
+
+    def _vertical_slot_rects(self, order: list[str]) -> dict[str, QRect]:
+        rects: dict[str, QRect] = {}
+        y = 0
+        width = self._container.width()
+        for item_id in order:
+            widget = self._widgets[item_id]
+            height = widget.height() or widget.sizeHint().height()
+            rects[item_id] = QRect(0, y, width, height)
+            y += height + self._spacing
+        return rects
+
+    def _drag_geometry(self, top_left: QPoint) -> QRect:
+        base = QRect(self._drag_restore_rect)
+        return QRect(top_left.x(), top_left.y(), base.width(), base.height())
+
+    def _animate_placeholder(self, rect: QRect) -> None:
+        if self._placeholder_animation is not None:
+            self._placeholder_animation.stop()
+        self._placeholder_animation = QPropertyAnimation(self._placeholder, b"geometry")
+        self._placeholder_animation.setDuration(self.REORDER_DURATION_MS)
+        self._placeholder_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._placeholder_animation.setStartValue(self._placeholder.geometry())
+        self._placeholder_animation.setEndValue(rect)
+        self._placeholder_animation.start()
+
+    def _animate_widget_geometry(
+        self,
+        widget: QWidget,
+        rect: QRect,
+        duration: int,
+        finished_callback: Callable[[], None] | None = None,
+    ) -> None:
+        current = widget.geometry()
+        if current == rect:
+            if finished_callback is not None:
+                finished_callback()
+            return
+        self._stop_animation(widget)
+        animation = QPropertyAnimation(widget, b"geometry")
+        animation.setDuration(duration)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        animation.setStartValue(current)
+        animation.setEndValue(rect)
+        if finished_callback is not None:
+            animation.finished.connect(finished_callback)
+        animation.start()
+        self._animations[widget] = animation
+
+    def _stop_animation(self, widget: QWidget) -> None:
+        animation = self._animations.pop(widget, None)
+        if animation is not None:
+            animation.stop()
+
+    def _complete_drag(self, persist: bool) -> Callable[[], None]:
+        def finish() -> None:
+            dragged = self._widgets.get(self._drag_item_id)
+            if dragged is not None:
+                dragged.setGraphicsEffect(None)
+            self._placeholder.hide()
+            self._reset_drag_state()
+            self.relayout(animated=False)
+            if persist:
+                self._persist_order(self.order())
+
+        return finish
+
+    def _reset_drag_state(self) -> None:
+        self._drag_item_id = ""
+        self._drag_started = False
+        self._drag_origin = QPoint()
+        self._drag_press_offset = QPoint()
+        self._drag_restore_rect = QRect()
+        self._drag_original_order = self.order()
+
+
 class MetricCard(QFrame):
     def __init__(self, title: str, icon_name: str, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("card")
+        self.drag_handle = GripHandle(self)
+        self.drag_handle.setToolTip("拖拽调整本层卡片顺序")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(CARD_PADDING, 7, CARD_PADDING, 7)
         layout.setSpacing(2)
@@ -190,11 +603,18 @@ class MetricCard(QFrame):
     def set_title(self, title: str) -> None:
         self.title_label.setText(title)
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.drag_handle.raise_()
+        self.drag_handle.move(max(6, self.width() - self.drag_handle.width() - 10), 10)
+
 
 class TrendCard(QFrame):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("card")
+        self.drag_handle = GripHandle(self)
+        self.drag_handle.setToolTip("拖拽调整本层卡片顺序")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(CARD_PADDING, 8, CARD_PADDING, 6)
         layout.setSpacing(2)
@@ -239,6 +659,11 @@ class TrendCard(QFrame):
             slot=self._on_mouse_moved,
         )
         layout.addWidget(self.plot, 1)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.drag_handle.raise_()
+        self.drag_handle.move(max(6, self.width() - self.drag_handle.width() - 10), 8)
 
     def set_rows(self, rows: list[dict], today: date | None = None) -> None:
         current = today or date.today()
@@ -332,6 +757,8 @@ class StatisticsCard(QFrame):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("card")
+        self.drag_handle = GripHandle(self)
+        self.drag_handle.setToolTip("拖拽调整本层卡片顺序")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(CARD_PADDING, 8, CARD_PADDING, 6)
         layout.setSpacing(0)
@@ -366,6 +793,11 @@ class StatisticsCard(QFrame):
             layout.addWidget(row)
             self._values.append(value)
         layout.addStretch(1)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.drag_handle.raise_()
+        self.drag_handle.move(max(6, self.width() - self.drag_handle.width() - 10), 8)
 
     def set_data(self, data: TokenData) -> None:
         recent_rows = {
@@ -444,15 +876,17 @@ class MainPanel(QFrame):
         content.setContentsMargins(PANEL_PADDING, 8, PANEL_PADDING, 8)
         content.setSpacing(SECTION_SPACING)
 
-        metrics = QHBoxLayout()
-        metrics.setSpacing(SECTION_SPACING)
+        self._layout_state = _normalize_panel_layout_state(config_manager.load_panel_layout_state())
+
+        self.metrics_container = ReorderArea()
+        self.metrics_container.setFixedHeight(METRIC_CARD_HEIGHT)
         self.today_card = MetricCard("今日使用金额", "usage")
         self.balance_card = MetricCard("账户余额", "balance")
         self.month_card = MetricCard("本月累计", "month")
         for card in (self.today_card, self.balance_card, self.month_card):
             card.setFixedHeight(METRIC_CARD_HEIGHT)
-            metrics.addWidget(card, 1)
-        content.addLayout(metrics)
+        self.top_section = PanelSection(self.metrics_container, "拖拽调整上中下层顺序")
+        self.top_section.setFixedHeight(METRIC_CARD_HEIGHT)
 
         self.activity_card = QFrame()
         self.activity_card.setObjectName("card")
@@ -479,20 +913,58 @@ class MainPanel(QFrame):
         self.activity_scroll.setWidget(self.activity)
         self.activity_scroll.setFixedHeight(self.activity.height())
         activity_layout.addWidget(self.activity_scroll)
-        content.addWidget(self.activity_card)
+        self.middle_section = PanelSection(self.activity_card, "拖拽调整上中下层顺序")
+        self.middle_section.setFixedHeight(ACTIVITY_CARD_HEIGHT)
 
-        lower_container = QWidget()
-        lower_container.setFixedHeight(LOWER_CARD_HEIGHT)
-        lower = QHBoxLayout(lower_container)
-        lower.setContentsMargins(0, 0, 0, 0)
-        lower.setSpacing(SECTION_SPACING)
+        self.lower_container = ReorderArea()
+        self.lower_container.setFixedHeight(LOWER_CARD_HEIGHT)
         self.trend = TrendCard()
         self.statistics = StatisticsCard()
         self.trend.setFixedHeight(LOWER_CARD_HEIGHT)
         self.statistics.setFixedHeight(LOWER_CARD_HEIGHT)
-        lower.addWidget(self.trend, 2)
-        lower.addWidget(self.statistics, 1)
-        content.addWidget(lower_container)
+        self.bottom_section = PanelSection(self.lower_container, "拖拽调整上中下层顺序")
+        self.bottom_section.setFixedHeight(LOWER_CARD_HEIGHT)
+
+        self.sections_container = ReorderArea()
+        self.sections_container.setFixedHeight(
+            METRIC_CARD_HEIGHT + ACTIVITY_CARD_HEIGHT + LOWER_CARD_HEIGHT + SECTION_SPACING * 2
+        )
+        content.addWidget(self.sections_container)
+
+        self._section_reorder = ReorderController(
+            self.sections_container,
+            Qt.Orientation.Vertical,
+            PANEL_LAYOUT_DEFAULTS["sections"],
+            lambda order: self._persist_layout_order("sections", order),
+        )
+        self._section_reorder.register_item("top", self.top_section, self.top_section.drag_handle)
+        self._section_reorder.register_item("middle", self.middle_section, self.middle_section.drag_handle)
+        self._section_reorder.register_item("bottom", self.bottom_section, self.bottom_section.drag_handle)
+
+        self._top_card_reorder = ReorderController(
+            self.metrics_container,
+            Qt.Orientation.Horizontal,
+            PANEL_LAYOUT_DEFAULTS["top_cards"],
+            lambda order: self._persist_layout_order("top_cards", order),
+            slot_stretches=[1, 1, 1],
+        )
+        self._top_card_reorder.register_item("today", self.today_card, self.today_card.drag_handle)
+        self._top_card_reorder.register_item("balance", self.balance_card, self.balance_card.drag_handle)
+        self._top_card_reorder.register_item("month", self.month_card, self.month_card.drag_handle)
+
+        self._bottom_card_reorder = ReorderController(
+            self.lower_container,
+            Qt.Orientation.Horizontal,
+            PANEL_LAYOUT_DEFAULTS["bottom_cards"],
+            lambda order: self._persist_layout_order("bottom_cards", order),
+            item_stretches={"trend": 2, "statistics": 1},
+        )
+        self._bottom_card_reorder.register_item("trend", self.trend, self.trend.drag_handle)
+        self._bottom_card_reorder.register_item("statistics", self.statistics, self.statistics.drag_handle)
+
+        self._section_reorder.set_order(self._layout_state["sections"])
+        self._top_card_reorder.set_order(self._layout_state["top_cards"])
+        self._bottom_card_reorder.set_order(self._layout_state["bottom_cards"])
 
         footer_widget = QWidget()
         footer_widget.setObjectName("statusBar")
@@ -530,6 +1002,17 @@ class MainPanel(QFrame):
         button.setFixedSize(32, 32)
         button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         return button
+
+    def _persist_layout_order(self, key: str, order: list[str]) -> None:
+        self._layout_state[key] = list(order)
+        config_manager.save_panel_layout_state(self.layout_state())
+
+    def layout_state(self) -> dict[str, list[str]]:
+        return {
+            "sections": self._section_reorder.order(),
+            "top_cards": self._top_card_reorder.order(),
+            "bottom_cards": self._bottom_card_reorder.order(),
+        }
 
     def set_refreshing(self, refreshing: bool) -> None:
         self.refresh_button.setEnabled(not refreshing)

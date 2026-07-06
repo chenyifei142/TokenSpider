@@ -76,6 +76,7 @@ def config_dir() -> Path:
 
 CONFIG_DIR = config_dir()
 WIDGET_STATE_PATH = CONFIG_DIR / "widget-state.json"
+PANEL_LAYOUT_PATH = CONFIG_DIR / "panel-layout.json"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 LOG_PATH = CONFIG_DIR / "TokenSpider.log"
 LEGACY_CONFIG_PATH = app_dir() / "config.py"
@@ -373,6 +374,22 @@ def save_widget_position(x: int, y: int) -> None:
         )
     except OSError:
         logger().warning("Widget position could not be saved")
+
+
+def load_panel_layout_state() -> dict[str, Any]:
+    try:
+        value = json.loads(PANEL_LAYOUT_PATH.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
+
+
+def save_panel_layout_state(values: dict[str, Any]) -> None:
+    try:
+        # 面板排序变化频率高于普通设置，单独落盘可避免触发配置备份与凭据回滚流程。
+        _write_json(PANEL_LAYOUT_PATH, values)
+    except OSError:
+        logger().warning("Panel layout state could not be saved")
 
 
 def load_config() -> dict[str, Any]:
