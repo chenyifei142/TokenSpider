@@ -87,15 +87,31 @@ def normalize_activity(
 
 
 def activity_levels(days: Iterable[TokenActivityDay]) -> dict[date, int]:
-    values = sorted(day.token_count for day in days if day.token_count > 0)
+    days = list(days)
+    values = [day.token_count for day in days if day.token_count > 0]
     if not values:
         return {}
-    # Cap the scale at the 95th percentile so a single spike does not flatten normal days.
-    cap_index = max(0, ceil(len(values) * 0.95) - 1)
-    scale_max = max(1, values[cap_index])
-    denominator = log1p(scale_max)
+
+    scale_min = min(values)
+    scale_max = max(values)
+    # An order-of-magnitude spread needs logarithmic scaling; linear ratios would
+    # otherwise push nearly every non-maximum day into the lowest active level.
+    use_log_scale = scale_max >= scale_min * 10
+    transformed_min = log1p(scale_min) if use_log_scale else scale_min
+    transformed_max = log1p(scale_max) if use_log_scale else scale_max
+    denominator = transformed_max - transformed_min
+
+    def level_for(value: int) -> int:
+        if value == scale_max or denominator == 0:
+            return 5
+        transformed = log1p(value) if use_log_scale else value
+        ratio = (transformed - transformed_min) / denominator
+        # Stretch the visible non-zero range across levels 1-4 so close values
+        # remain distinguishable instead of clustering near the maximum color.
+        return min(4, max(1, ceil(ratio * 3) + 1))
+
     return {
-        day.date: min(4, max(1, ceil(log1p(min(day.token_count, scale_max)) / denominator * 4)))
+        day.date: level_for(day.token_count)
         for day in days
         if day.token_count > 0
     }

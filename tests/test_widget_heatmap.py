@@ -56,9 +56,47 @@ def test_levels_use_robust_dynamic_scale():
     )
     levels = activity_levels(days)
 
-    assert 1 <= levels[date(2026, 7, 1)] <= 4
-    assert levels[date(2026, 7, 1)] < levels[date(2026, 7, 2)]
-    assert levels[date(2026, 7, 3)] == 4
+    assert levels[date(2026, 7, 1)] == 1
+    assert levels[date(2026, 7, 2)] == 2
+    assert levels[date(2026, 7, 3)] == 5
+
+
+def test_levels_renormalize_when_visible_maximum_changes():
+    maximum_day = date(2026, 7, 3)
+    _period, days_with_100_max = normalize_activity(
+        [{"date": maximum_day.isoformat(), "tokens": 100}],
+        maximum_day,
+    )
+    _period, days_with_10_max = normalize_activity(
+        [{"date": maximum_day.isoformat(), "tokens": 10}],
+        maximum_day,
+    )
+
+    assert activity_levels(days_with_100_max)[maximum_day] == 5
+    assert activity_levels(days_with_10_max)[maximum_day] == 5
+    assert date(2026, 7, 2) not in activity_levels(days_with_10_max)
+
+
+def test_levels_stretch_close_values_across_active_colors():
+    end = date(2026, 7, 3)
+    rows = [
+        {
+            "date": (end - timedelta(days=index)).isoformat(),
+            "tokens": value,
+        }
+        for index, value in enumerate((100, 99, 98, 97, 96))
+    ]
+    _period, days = normalize_activity(rows, end)
+
+    levels = activity_levels(days)
+
+    assert [levels[end - timedelta(days=index)] for index in range(5)] == [
+        5,
+        4,
+        3,
+        2,
+        1,
+    ]
 
 
 def test_token_values_use_wan_units():
