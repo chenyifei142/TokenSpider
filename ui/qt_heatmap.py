@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from PySide6.QtCore import QPoint, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
 
 from ui.activity import (
@@ -21,7 +21,6 @@ from ui.qt_theme import (
     C_ACCENT_2,
     C_GLASS_BORDER,
     C_HEAT,
-    C_LOW_BLUE,
     C_PALE_BLUE,
     C_SUBTEXT,
     C_SURFACE,
@@ -177,17 +176,34 @@ class TokenActivityHeatmap(QWidget):
                 # future dates present without introducing a black visual break.
                 color = QColor(C_HEAT[0])
             elif not in_range:
-                color = QColor(C_LOW_BLUE)
+                color = QColor(C_HEAT[0])
             else:
                 color = QColor(C_HEAT[self._levels.get(day.date, 0)])
-            painter.setBrush(color)
+            level = self._levels.get(day.date, 0) if in_range else 0
+            if level > 0:
+                # Keep the selected blue depth visible at 11 px without letting
+                # the halo overpower the surrounding panel content.
+                glow = QColor(color)
+                glow.setAlpha(14 + level * 4)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(glow)
+                painter.drawRoundedRect(rect.adjusted(-0.8, -0.8, 0.8, 0.8), 3.2, 3.2)
+                gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+                gradient.setColorAt(0, color.lighter(106))
+                gradient.setColorAt(1, color)
+                painter.setBrush(QBrush(gradient))
+            else:
+                painter.setBrush(color)
             if day.date == self._hovered:
                 painter.setPen(QPen(QColor(C_PALE_BLUE), 1.5))
             elif day.date == self._period.end:
                 painter.setPen(QPen(QColor(C_ACCENT_2), 1.2))
             else:
-                painter.setPen(QPen(color.lighter(112), 0.7))
-            painter.drawRoundedRect(rect, 2.5, 2.5)
+                # Empty cells need a stronger edge than active cells so the
+                # calendar grid remains legible against the dark card surface.
+                border_lightness = 135 if level == 0 else 112
+                painter.setPen(QPen(color.lighter(border_lightness), 0.7))
+            painter.drawRoundedRect(rect, 2.8, 2.8)
             if day.date <= self._period.end:
                 self._hits.append((rect, day))
 

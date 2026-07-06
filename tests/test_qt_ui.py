@@ -86,6 +86,9 @@ def test_trend_uses_daily_cost_and_money_tooltip():
     assert trend.title.text() == "近 7 天使用金额"
     assert trend._values == [0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0]
     assert len(trend._series.xData) > len(trend._values)
+    x_min, x_max = trend.plot.getViewBox().viewRange()[0]
+    assert x_min == -0.5
+    assert x_max == 6.5
     for index, value in enumerate(trend._values):
         point = next(
             position
@@ -96,6 +99,11 @@ def test_trend_uses_daily_cost_and_money_tooltip():
     assert (date.today() - timedelta(days=6)).isoformat() in trend.tooltip_text(0)
     assert "使用金额：¥0.60" in trend.tooltip_text(0)
     assert trend._hover_marker.isVisible()
+    scene_point = trend.plot.getViewBox().mapViewToScene(QPointF(6, 0))
+    trend._on_mouse_moved((scene_point,))
+    marker_x, marker_y = trend._hover_marker.getData()
+    assert marker_x.tolist() == [6]
+    assert marker_y.tolist() == [0.0]
     trend.close()
 
 
@@ -166,7 +174,14 @@ def test_panel_uses_shared_glass_theme_and_fluent_action_buttons():
     assert C_GLASS_BORDER == "rgba(102, 166, 255, 41)"
     assert C_ACCENT == "#2767E5"
     assert C_TEXT == "#E5E9F0"
-    assert C_HEAT == ("#132A5D", "#1442A2", "#1F58C7", "#2767E5", "#4E8BF2")
+    assert C_HEAT == (
+        "#0B2440",
+        "#0B4087",
+        "#0958B8",
+        "#116CD2",
+        "#2497FA",
+        "#9ED0FD",
+    )
     assert [button.toolTip() for button in buttons] == ["设置", "刷新", "收起"]
     assert all(not button.icon().isNull() for button in buttons)
     assert all(button.iconSize().width() == 18 for button in buttons)

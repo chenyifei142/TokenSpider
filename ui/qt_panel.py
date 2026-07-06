@@ -226,7 +226,9 @@ class TrendCard(QFrame):
         self.plot.getAxis("left").setWidth(52)
         self.plot.getAxis("left").enableAutoSIPrefix(False)
         self.plot.getAxis("bottom").setHeight(22)
-        self.plot.getViewBox().setLimits(xMin=0, xMax=6, yMin=0)
+        # Leave half a day at both edges so the first and last points are not
+        # clamped to the plot border while all dates keep their integer x positions.
+        self.plot.getViewBox().setLimits(xMin=-0.5, xMax=6.5, yMin=0)
         self._dates: list[date] = []
         self._values: list[float] = []
         self._series: pg.PlotDataItem | None = None
@@ -282,9 +284,8 @@ class TrendCard(QFrame):
         self.plot.getAxis("bottom").setTicks(
             [[(index, day.strftime("%m/%d")) for index, day in enumerate(self._dates)]]
         )
-        # Keep edge dates and the highest money tick inside the compact plot,
-        # where PyQtGraph would otherwise clip labels at the view boundaries.
-        self.plot.setXRange(-0.6, 6.6, padding=0)
+        # Match the ViewBox limits so the intended edge spacing is not clamped away.
+        self.plot.setXRange(-0.5, 6.5, padding=0)
         maximum = max(self._values, default=0)
         tick_max = max(0.01, maximum * 1.18)
         self.plot.setYRange(0, tick_max * 1.18, padding=0)
