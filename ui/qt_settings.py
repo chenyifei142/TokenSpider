@@ -53,6 +53,44 @@ class ConnectionWorker(QThread):
         self.finished_with_data.emit(result)
 
 
+class _MiMoCookieWorker(QThread):
+    """负责实际拉起 Chrome 并通过 CDP 读回 MiMo Cookie。
+
+    线程在空闲状态会在浏览器进程打开后，持续等待主线程设置
+    ``stop_event``。一旦被设置，线程立即读取 cookie 并通过 ``success``
+    信号传出；中途若出现异常，则通过 ``error`` 信号传出错提示。
+    """
+
+    success = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, parent=None, use_edge: bool = False):
+        super().__init__(parent)
+        import threading
+
+        self._stop_event = threading.Event()
+        self._use_edge = use_edge
+
+    def stop_and_collect(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        from api.providers.mimo import MiMoProvider
+
+        try:
+            cookie = MiMoProvider.acquire_cookie_via_chrome(
+                self._stop_event,
+                use_edge=self._use_edge,
+            )
+        except RuntimeError as exc:
+            self.error.emit(MiMoProvider.describe_acquire_error(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(MiMoProvider.describe_acquire_error(exc))
+            return
+        self.success.emit(cookie)
+
+
 class SettingsWindow(QDialog):
     def __init__(
         self,
@@ -68,7 +106,9 @@ class SettingsWindow(QDialog):
         self.on_saved = on_saved
         self.update_controller = update_controller
         self._worker: ConnectionWorker | None = None
+        self._mimo_cookie_worker: "_MiMoCookieWorker | None" = None
         self._rendered_provider_id = ""
+        self._provider_widgets: dict[str, Union[QLineEdit, QPlainTextEdit]] = {}
         self._provider_drafts: dict[str, dict[str, str]] = {}
         self._test_config_backup: dict[str, Any] | None = None
 
@@ -237,6 +277,114 @@ class SettingsWindow(QDialog):
         target_height = min(content_size.height(), max_height)
         self.resize(target_width, target_height)
 
+    def _begin_mimo_cookie_acquire(self) -> None:
+        """用户点击『一键获取 MiMo Cookie』。
+
+        会尝试识别当前 provider 是否为 mimo，拉起浏览器并等待登录。但真正的
+        读取要等用户点『完成采集』后才进行。
+        """
+        if self._rendered_provider_id != "mimo":
+            return
+        acquire_button = getattr(self, "_mimo_acquire_button", None)
+        if acquire_button is None:
+            return
+        acquire_button.setEnabled(False)
+        acquire_button.setText("正在打开浏览器…")
+        status_label = getattr(self, "_mimo_status_label", None)
+        if status_label is not None:
+            status_label.setText("正在打开浏览器，请在浏览器中完成登录。")
+        worker = _MiMoCookieWorker(self, use_edge=False)
+        self._mimo_cookie_worker = worker
+        worker.success.connect(self._apply_mimo_cookie_from_acquired)
+        worker.error.connect(self._mimo_acquire_failed)
+        worker.finished.connect(self._cleanup_mimo_cookie_worker)
+        worker.start()
+        # 等 0.5 秒后切换状态：让浏览器打开后，用户可以点“完成采集”
+        try:
+            from PySide6.QtCore import QTimer
+
+            def _after_poll() -> None:
+                if self._mimo_cookie_worker is worker and worker.isRunning():
+                    finish_button = getattr(self, "_mimo_finish_button", None)
+                    if finish_button is not None:
+                        finish_button.setVisible(True)
+                        finish_button.setEnabled(True)
+                button_text = "浏览器已打开，请登录后回到本窗口点击『完成采集』"
+                status_label = getattr(self, "_mimo_status_label", None)
+                if status_label is not None:
+                    status_label.setText(button_text)
+
+            QTimer.singleShot(500, _after_poll)
+        except Exception:
+            pass
+
+    def _finish_mimo_cookie_acquire(self) -> None:
+        worker = getattr(self, "_mimo_cookie_worker", None)
+        if worker is None:
+            return
+        status_label = getattr(self, "_mimo_status_label", None)
+        if status_label is not None:
+            status_label.setText("正在读取 Cookie…")
+        worker.stop_and_collect()
+
+    def _apply_mimo_cookie_from_acquired(self, cookie_text: str) -> None:
+        if self._rendered_provider_id != "mimo":
+            return
+        normalized = _normalize_cookie(cookie_text)
+        if not normalized:
+            return
+        cookie_widget = self._provider_widgets.get("COOKIE")
+        ph_widget = self._provider_widgets.get("API_PLATFORM_PH")
+        # 1) Cookie 输入框：直接填（覆盖旧值），保持用户在浏览器里拿到的最新会话。
+        if cookie_widget is not None:
+            if isinstance(cookie_widget, QPlainTextEdit):
+                cookie_widget.setPlainText(normalized)
+            else:
+                cookie_widget.setText(normalized)
+        # 2) api-platform_ph 输入框：无论原来是否有值，都从 cookie 里解析一次
+        # 并填入，确保保存的 URL query 和请求头一致。
+        ph_value = _extract_cookie_value(normalized, "api-platform_ph")
+        if ph_widget is not None:
+            if isinstance(ph_widget, QPlainTextEdit):
+                ph_widget.setPlainText(ph_value)
+            else:
+                ph_widget.setText(ph_value)
+        # 3) 同步写入 provider_drafts，防止「用户没有再次修改输入框」时保存走旧值。
+        draft = self._provider_drafts.setdefault("mimo", {})
+        if cookie_widget is not None:
+            draft["COOKIE"] = normalized
+        if ph_widget is not None:
+            draft["API_PLATFORM_PH"] = ph_value
+        acquire_button = getattr(self, "_mimo_acquire_button", None)
+        if acquire_button is not None:
+            acquire_button.setEnabled(True)
+            acquire_button.setText("一键获取 MiMo Cookie")
+        finish_button = getattr(self, "_mimo_finish_button", None)
+        if finish_button is not None:
+            finish_button.setVisible(False)
+        status_label = getattr(self, "_mimo_status_label", None)
+        if status_label is not None:
+            status_label.setText("Cookie 已自动填入，请保存设置。")
+
+    def _mimo_acquire_failed(self, message: str) -> None:
+        acquire_button = getattr(self, "_mimo_acquire_button", None)
+        if acquire_button is not None:
+            acquire_button.setEnabled(True)
+            acquire_button.setText("重试")
+        finish_button = getattr(self, "_mimo_finish_button", None)
+        if finish_button is not None:
+            finish_button.setVisible(False)
+        status_label = getattr(self, "_mimo_status_label", None)
+        if status_label is not None:
+            status_label.setText(str(message))
+        config_manager.logger().warning("mimo cookie acquire failed: %s", str(message))
+
+    def _cleanup_mimo_cookie_worker(self) -> None:
+        worker = getattr(self, "_mimo_cookie_worker", None)
+        if worker is not None and hasattr(worker, "deleteLater"):
+            worker.deleteLater()
+        self._mimo_cookie_worker = None
+
     def _remember_visible_credentials(self) -> None:
         if not self._rendered_provider_id:
             return
@@ -329,6 +477,27 @@ class SettingsWindow(QDialog):
                             ph_widget.setPlainText(ph_in_cookie)
                         else:
                             ph_widget.setText(ph_in_cookie)
+            # 在「Cookie」输入框下方加一行：一键获取 MiMo Cookie 按钮与状态提示。
+            if provider_id == "mimo":
+                cookie_row = QWidget()
+                cookie_row_layout = QHBoxLayout(cookie_row)
+                cookie_row_layout.setContentsMargins(0, 4, 0, 0)
+                cookie_row_layout.setSpacing(8)
+                acquire_button = QPushButton("一键获取 MiMo Cookie")
+                acquire_button.setCursor(cookie_row.cursor())
+                acquire_button.clicked.connect(self._begin_mimo_cookie_acquire)
+                self._mimo_acquire_button = acquire_button
+                self._mimo_finish_button = QPushButton("完成采集")
+                self._mimo_finish_button.setVisible(False)
+                self._mimo_finish_button.clicked.connect(self._finish_mimo_cookie_acquire)
+                status_label = QLabel("通过本机浏览器登录后，可一键把 Cookie 填回到上方输入框。")
+                status_label.setWordWrap(True)
+                status_label.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
+                self._mimo_status_label = status_label
+                cookie_row_layout.addWidget(acquire_button)
+                cookie_row_layout.addWidget(self._mimo_finish_button)
+                cookie_row_layout.addWidget(status_label, 1)
+                self.credentials_layout.addWidget(cookie_row)
         self._rendered_provider_id = provider_id
         self._sync_window_size()
 

@@ -8,6 +8,7 @@ os.environ["APPDATA"] = str(Path.cwd() / ".test-appdata")
 from api.deepseek import APIError
 from api.providers.deepseek import DeepSeekProvider
 from api.providers.mimo import MiMoProvider
+import config_manager
 
 
 def response(payload, status=200):
@@ -236,6 +237,177 @@ class DeepSeekProviderTests(unittest.TestCase):
             MiMoProvider.extract_cookie_value('api-platform_ph="abc=="; userId=1', "api-platform_ph"),
             "abc==",
         )
+
+
+    @patch("api.providers.mimo.MiMoProvider.find_chrome_executable")
+    def test_acquire_cookie_fails_gracefully_when_no_chrome(self, find_executable: Mock) -> None:
+        find_executable.return_value = ""
+        import threading
+
+        with self.assertRaises(RuntimeError):
+            MiMoProvider.acquire_cookie_via_chrome(threading.Event())
+
+    def test_cookie_helper_handles_multiple_formats(self) -> None:
+        # 1) 单行 name=value; name2=value2
+        self.assertEqual(
+            MiMoProvider.extract_cookie_value(
+                "a=1; api-platform_ph=some-token; c=3", "api-platform_ph"
+            ),
+            "some-token",
+        )
+        # 2) 换行与多余空白
+        self.assertEqual(
+            MiMoProvider.extract_cookie_value("a=1;\n api-platform_ph=xxx;\nc=3", "api-platform_ph"),
+            "xxx",
+        )
+        # 3) 被双引号括住
+        self.assertEqual(
+            MiMoProvider.extract_cookie_value('api-platform_ph="abc=="; userId=1', "api-platform_ph"),
+            "abc==",
+        )
+        # 4) 不包含字段时返回空串
+        self.assertEqual(
+            MiMoProvider.extract_cookie_value("userId=1; other=2", "api-platform_ph"),
+            "",
+        )
+
+    def test_normalize_cookie_squeezes_whitespace(self) -> None:
+        self.assertEqual(
+            MiMoProvider.normalize_cookie("a=1; \n b=2 ; \n c=3"),
+            "a=1; b=2; c=3",
+        )
+        self.assertEqual(MiMoProvider.normalize_cookie(""), "")
+
+    @patch("api.providers.mimo.MiMoProvider.acquire_cookie_via_chrome")
+    def test_error_message_lookup(self, acquire_mock: Mock) -> None:
+        acquire_mock.side_effect = RuntimeError("CHROME_NOT_FOUND")
+        try:
+            acquire_mock()
+        except RuntimeError as exc:
+            message = MiMoProvider.describe_acquire_error(exc)
+            self.assertIn("Chrome", message)
+
+    def test_cdp_prefers_mimo_url_over_others(self) -> None:
+        """``_pick_websocket_endpoint`` 应优先选择 MiMo 域名下的 target。"""
+        fake_response = [
+            {
+                "type": "background_page",
+                "url": "chrome-extension://abc/background.html",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9288/devtools/page/A",
+            },
+            {
+                "type": "page",
+                "url": "https://platform.xiaomimimo.com/console/usage",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9288/devtools/page/B",
+            },
+            {
+                "type": "other",
+                "url": "https://example.com",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9288/devtools/page/C",
+            },
+        ]
+
+        captured: list[str] = []
+
+        def fake_http(host: str, port: int, path: str, timeout: float) -> object:  # noqa: ARG001
+            captured.append(path)
+            # 只有 ``/json`` 返回目标列表；其他路径 ``/json/version`` 也应返回合法 JSON。
+            if path == "/json":
+                return fake_response
+            return {"Browser": "Chrome/149"}
+
+        with patch.object(MiMoProvider, "_http_json", side_effect=fake_http):
+            got = MiMoProvider._pick_websocket_endpoint(9288)
+        self.assertEqual(got, "ws://127.0.0.1:9288/devtools/page/B")
+        self.assertIn("/json", captured)
+
+    def test_cdp_falls_back_to_first_acceptable_target(self) -> None:
+        """如果列表中没有 MiMo 域名，回退到第一个可用 target 而不是直接报错。"""
+        fake_response = [
+            {
+                "type": "background_page",
+                "url": "chrome-extension://abc/background.html",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9288/devtools/page/A",
+            },
+            {"type": "service_worker", "webSocketDebuggerUrl": "ws://127.0.0.1:9288/devtools/page/SW"},
+        ]
+
+        def fake_http(host: str, port: int, path: str, timeout: float) -> object:  # noqa: ARG001
+            return fake_response
+
+        with patch.object(MiMoProvider, "_http_json", side_effect=fake_http):
+            got = MiMoProvider._pick_websocket_endpoint(9288)
+        # ``service_worker`` 不在可接受集合内，只能取 background_page。
+        self.assertEqual(got, "ws://127.0.0.1:9288/devtools/page/A")
+
+    def test_cdp_raises_when_no_suitable_target(self) -> None:
+        """所有条目都没有 webSocketDebuggerUrl 时，应抛 ``CDP_NO_PAGE_TARGET``。"""
+        fake_response = [
+            {"type": "page", "url": "https://example.com"},
+            {"type": "other", "url": "about:blank"},
+        ]
+
+        def fake_http(host: str, port: int, path: str, timeout: float) -> object:  # noqa: ARG001
+            return fake_response
+
+        with patch.object(MiMoProvider, "_http_json", side_effect=fake_http):
+            with self.assertRaises(RuntimeError) as ctx:
+                MiMoProvider._pick_websocket_endpoint(9288)
+        self.assertEqual(str(ctx.exception), "CDP_NO_PAGE_TARGET")
+
+    def test_cdp_send_text_handles_broken_ws_url(self) -> None:
+        """``_cdp_send_text`` 不应因非法 URL 或 socket 问题抛异常。"""
+        # 非法 scheme 不会建立连接；方法应安静返回。
+        MiMoProvider._cdp_send_text("http://127.0.0.1:1", {"id": 1, "method": "Browser.close"})
+        # 端口不可用；``socket.create_connection`` 抛 OSError 被内部吞掉。
+        MiMoProvider._cdp_send_text(
+            "ws://127.0.0.1:1/devtools/page/0000", {"id": 1, "method": "Browser.close"}
+        )
+
+    def test_format_cookie_string_relaxes_domain_and_strips_quotes(self) -> None:
+        """``_format_cookie_string`` 必须能识别 ``xiaomimimo.com`` 任意子域，
+        并把 ``api-platform_ph`` 引号去掉；否则会导致请求头/URL 里
+        出现 ``""...""`` 或被 domain 过滤掉。
+        """
+        cookies = [
+            {"name": "api-platform_ph", "value": '"abc%2Fdef%3D123"', "domain": ".xiaomimimo.com"},
+            {"name": "api-platform_serviceToken", "value": "token-value", "domain": "platform.xiaomimimo.com"},
+            {"name": "userId", "value": "12345678", "domain": "xiaomimimo.com"},
+            {"name": "_ga", "value": "GA1.2.0", "domain": "xiaomimimo.com"},  # 非关键字段，忽略
+            {"name": "other_session", "value": "x", "domain": "other.example.com"},
+        ]
+        got = MiMoProvider._format_cookie_string(cookies)
+        # api-platform_ph 必须去引号，并保留原本的百分编码。
+        self.assertIn('api-platform_ph=abc%2Fdef%3D123', got)
+        # serviceToken 和 userId 必须被包含（落在 ``xiaomimimo.com`` 子域上）。
+        self.assertIn("api-platform_serviceToken=token-value", got)
+        self.assertIn("userId=12345678", got)
+        # 非关键字段不会出现在 cookie 中。
+        self.assertNotIn("_ga=", got)
+        self.assertNotIn("other_session=", got)
+
+    def test_url_strips_quotes_from_api_platform_ph(self) -> None:
+        """``_url`` 拼接 ``api-platform_ph`` 前应去掉外层引号，防止
+        query 里出现 ``"`` 字符导致 404。
+        """
+        provider = MiMoProvider()
+
+        class _ConfigCache(dict):
+            def get(self, key, default=""):  # type: ignore[override]
+                return super().get(key, default)
+
+        fake = _ConfigCache(MIMO_COOKIE='a=1; api-platform_ph="xx/yy==zz"; userId=8')
+        # 临时替换 ``config_manager`` 的读接口。
+        original = config_manager.get
+        try:
+            config_manager.get = fake.get  # type: ignore[method-assign]
+            url = provider._url("/api/v1/balance")
+        finally:
+            config_manager.get = original  # type: ignore[method-assign]
+        self.assertTrue(url.startswith("https://platform.xiaomimimo.com/api/v1/balance?api-platform_ph="))
+        # 不能出现双引号；原本的 "/" 和 "=" 必须保留。
+        self.assertNotIn('"', url)
+        self.assertIn("xx/yy==zz", url)
 
 
 if __name__ == "__main__":
