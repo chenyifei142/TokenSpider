@@ -1,4 +1,6 @@
-"""TokenSpider — real-time LLM API usage monitor (floating desktop widget)."""
+"""TokenScope real-time LLM API usage monitor."""
+
+from __future__ import annotations
 
 import ctypes
 import sys
@@ -7,14 +9,15 @@ from ctypes import wintypes
 import config_manager
 from PySide6.QtWidgets import QApplication
 
+from app_identity import APP_DISPLAY_NAME, APP_VERSION, SINGLE_INSTANCE_MUTEX
+from app_update import cleanup_pending_update
 from ui.qt_theme import APP_STYLE, app_icon
 from ui.qt_tray import SystemTray
 from ui.qt_widget import FloatingWidget
 
-__version__ = "1.2.0"
+__version__ = APP_VERSION
 
 ERROR_ALREADY_EXISTS = 183
-SINGLE_INSTANCE_MUTEX = "Local\\TokenSpider.SingleInstance"
 
 
 def _acquire_single_instance():
@@ -31,7 +34,8 @@ def _acquire_single_instance():
     if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
         kernel32.CloseHandle(handle)
         return None
-    # 句柄必须存活到主循环退出，Windows 才会持续阻止其他实例启动。
+    # Keep the legacy mutex name so upgraded builds still prevent duplicate
+    # instances from older TokenSpider binaries using the same user profile.
     return handle
 
 
@@ -42,7 +46,7 @@ def _release_single_instance(handle) -> None:
         kernel32.CloseHandle(handle)
 
 
-def _handle_exception(exc_type, exc, traceback):
+def _handle_exception(exc_type, exc, traceback) -> None:
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc, traceback)
         return
@@ -55,7 +59,7 @@ class App:
     def __init__(self):
         self.qt_app = QApplication.instance() or QApplication(sys.argv)
         self.qt_app.setQuitOnLastWindowClosed(False)
-        self.qt_app.setApplicationName("TokenSpider")
+        self.qt_app.setApplicationName(APP_DISPLAY_NAME)
         self.qt_app.setWindowIcon(app_icon(64))
         self.qt_app.setStyleSheet(APP_STYLE)
         self.widget = FloatingWidget(tray_icon=None)
@@ -64,21 +68,20 @@ class App:
 
     def run(self):
         sys.excepthook = _handle_exception
-        config_manager.logger().info("TokenSpider %s started", __version__)
+        cleanup_pending_update()
+        config_manager.logger().info("%s %s started", APP_DISPLAY_NAME, __version__)
         self.tray.run()
         try:
             return self.qt_app.exec()
         finally:
             self.tray.stop()
-            config_manager.logger().info("TokenSpider stopped")
+            config_manager.logger().info("%s stopped", APP_DISPLAY_NAME)
 
 
 if __name__ == "__main__":
     instance_handle = _acquire_single_instance()
     if instance_handle is None:
-        ctypes.windll.user32.MessageBoxW(
-            None, "TokenSpider 已在运行。", "TokenSpider", 0x40
-        )
+        ctypes.windll.user32.MessageBoxW(None, f"{APP_DISPLAY_NAME} 已在运行。", APP_DISPLAY_NAME, 0x40)
     else:
         try:
             App().run()

@@ -14,11 +14,11 @@ VSVersionInfo(
       StringTable(
         '040904B0',
         [
-          StringStruct('FileDescription', 'TokenScope API usage monitor'),
+          StringStruct('FileDescription', 'TokenScope standalone updater'),
           StringStruct('FileVersion', '1.3.0'),
-          StringStruct('InternalName', 'TokenScope'),
-          StringStruct('OriginalFilename', 'TokenScope.exe'),
-          StringStruct('ProductName', 'TokenScope'),
+          StringStruct('InternalName', 'TokenScopeUpdater'),
+          StringStruct('OriginalFilename', 'TokenScopeUpdater.exe'),
+          StringStruct('ProductName', 'TokenScopeUpdater'),
           StringStruct('ProductVersion', '1.3.0')
         ]
       )

@@ -17,8 +17,14 @@ class ConfigTests(unittest.TestCase):
                 "EDGE_HIDE_ENABLED"
             ]
         )
+        self.assertEqual(
+            config_manager.validate_config({"UPDATE_CHANNEL": "prerelease"})["UPDATE_CHANNEL"],
+            "prerelease",
+        )
         with self.assertRaises(ValueError):
             config_manager.validate_config({"ACTIVE_PROVIDER": "unknown"})
+        with self.assertRaises(ValueError):
+            config_manager.validate_config({"UPDATE_CHANNEL": "nightly"})
 
     def test_legacy_default_compact_size_is_migrated(self):
         temp_root = Path.cwd() / ".test-appdata" / "tmp"
@@ -98,6 +104,26 @@ class ConfigTests(unittest.TestCase):
 
                 layout_path.write_text("[]", encoding="utf-8")
                 self.assertEqual(config_manager.load_panel_layout_state(), {})
+
+    def test_update_state_round_trips_separately(self):
+        temp_root = Path.cwd() / ".test-appdata" / "tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temp_root) as directory:
+            state_path = Path(directory) / "update-state.json"
+            cleanup_path = Path(directory) / "pending-update-cleanup.json"
+            payload = {"latest_version": "1.3.0", "last_checked_at": "2026-07-06T00:00:00+00:00"}
+            cleanup_payload = {"version": 1, "cleanup_paths": ["C:/tmp/demo"]}
+
+            with (
+                patch.object(config_manager, "UPDATE_STATE_PATH", state_path),
+                patch.object(config_manager, "PENDING_UPDATE_CLEANUP_PATH", cleanup_path),
+            ):
+                config_manager.save_update_state(payload)
+                self.assertEqual(config_manager.load_update_state(), payload)
+                config_manager.save_pending_update_cleanup(cleanup_payload)
+                self.assertEqual(config_manager.load_pending_update_cleanup(), cleanup_payload)
+                config_manager.clear_pending_update_cleanup()
+                self.assertEqual(config_manager.load_pending_update_cleanup(), {})
 
 
 if __name__ == "__main__":

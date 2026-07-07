@@ -5,8 +5,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _call_keywords(name: str) -> dict[str, object]:
-    tree = ast.parse((ROOT / "TokenSpider.spec").read_text(encoding="utf-8"))
+def _call_keywords(path: str, name: str) -> dict[str, object]:
+    tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -16,11 +16,11 @@ def _call_keywords(name: str) -> dict[str, object]:
                 for keyword in node.keywords
                 if keyword.arg is not None
             }
-    raise AssertionError(f"{name} call not found in TokenSpider.spec")
+    raise AssertionError(f"{name} call not found in {path}")
 
 
 def test_pyqtgraph_startup_modules_are_packaged():
-    options = _call_keywords("Analysis")
+    options = _call_keywords("TokenSpider.spec", "Analysis")
     excluded = set(options["excludes"])
     required = {
         "pyqtgraph.imageview",
@@ -35,7 +35,15 @@ def test_pyqtgraph_startup_modules_are_packaged():
     } <= set(options["hiddenimports"])
 
 
-def test_windows_executable_uses_project_icon():
-    options = _call_keywords("EXE")
+def test_main_executable_uses_stable_name_and_project_icon():
+    options = _call_keywords("TokenSpider.spec", "EXE")
 
+    assert options["name"] == "TokenScope"
+    assert options["icon"] == ["assets/TokenSpider.ico"]
+
+
+def test_updater_executable_is_packaged_separately():
+    options = _call_keywords("TokenScopeUpdater.spec", "EXE")
+
+    assert options["name"] == "TokenScopeUpdater"
     assert options["icon"] == ["assets/TokenSpider.ico"]
