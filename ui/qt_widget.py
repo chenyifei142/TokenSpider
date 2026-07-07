@@ -35,6 +35,7 @@ from ui.geometry import (
 from ui.qt_ball import FloatingUsageBall
 from ui.qt_panel import MainPanel, format_money
 from ui.qt_settings import SettingsWindow
+from ui.qt_update import AppUpdateController
 
 
 DEF_PANEL_W = 820
@@ -93,6 +94,7 @@ class FloatingWidget(QWidget):
         self._drag_started = False
         self._drag_source = ""
         self._settings_window: SettingsWindow | None = None
+        self._update_controller = AppUpdateController(self)
         self._thread_pool = QThreadPool.globalInstance()
         # Edge auto-hide state.
         self._edge_snapped = False
@@ -147,6 +149,7 @@ class FloatingWidget(QWidget):
         # data arrives from the provider, which saves significant idle
         # CPU (painting a translucent anti-aliased circle is not free).
         self._show_compact_at_saved_position()
+        self._update_controller.schedule_startup_check()
         self.refresh()
 
     def _connect_ui(self) -> None:
@@ -573,13 +576,19 @@ class FloatingWidget(QWidget):
         # Reuse the same dialog so repeated opens do not duplicate signal
         # connections or leave hidden child windows behind.
         if self._settings_window is None:
-            self._settings_window = SettingsWindow(self, on_saved=self._on_config_saved)
+            self._settings_window = SettingsWindow(
+                self,
+                on_saved=self._on_config_saved,
+                update_controller=self._update_controller,
+            )
         self._settings_window.show()
         self._settings_window.raise_()
         self._settings_window.activateWindow()
 
     def _on_config_saved(self) -> None:
         config_manager.load_config()
+        self._update_controller.reload_cached_release()
+        self._update_controller.schedule_startup_check()
         self._reschedule_refresh()
         self.refresh()
 

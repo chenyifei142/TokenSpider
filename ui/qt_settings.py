@@ -31,6 +31,7 @@ from api.providers import PROVIDERS, list_providers
 from api.providers.base import FetchError
 from data.store import TokenData
 from ui.qt_theme import C_GREEN, C_RED, C_SUBTEXT
+from ui.qt_update import AppUpdateController
 
 _CARD_PADDING = 18
 
@@ -51,13 +52,19 @@ class ConnectionWorker(QThread):
 
 
 class SettingsWindow(QDialog):
-    def __init__(self, parent=None, on_saved: Callable[[], None] | None = None):
+    def __init__(
+        self,
+        parent=None,
+        on_saved: Callable[[], None] | None = None,
+        update_controller: AppUpdateController | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("TokenSpider 设置")
         self.setModal(False)
         self.setMinimumWidth(520)
         self.setMaximumWidth(680)
         self.on_saved = on_saved
+        self.update_controller = update_controller
         self._worker: ConnectionWorker | None = None
         self._rendered_provider_id = ""
         self._provider_drafts: dict[str, dict[str, str]] = {}
@@ -105,6 +112,47 @@ class SettingsWindow(QDialog):
         self.edge_hide_check.setToolTip("拖拽悬浮球到屏幕边缘后自动隐藏，鼠标移入时显示")
         global_form.addRow("贴边隐藏", self.edge_hide_check)
 
+        self.update_card = QFrame()
+        self.update_card.setObjectName("updateCard")
+        self.update_card.setStyleSheet(
+            "QFrame#updateCard { border: 1px solid #e5e7eb; border-radius: 10px; }"
+        )
+        update_layout = QVBoxLayout(self.update_card)
+        update_layout.setContentsMargins(_CARD_PADDING, 14, _CARD_PADDING, 14)
+        update_layout.setSpacing(10)
+        update_title = QLabel("软件更新")
+        update_title.setStyleSheet("font-size: 14px; font-weight: 600;")
+        update_layout.addWidget(update_title)
+
+        update_form = QFormLayout()
+        update_form.setHorizontalSpacing(16)
+        update_form.setVerticalSpacing(8)
+        self.current_version_label = QLabel()
+        self.auto_check_updates = QCheckBox("启动后自动检查")
+        self.update_channel_combo = QComboBox()
+        self.update_channel_combo.addItem("正式版", "stable")
+        self.update_channel_combo.addItem("预发布版", "prerelease")
+        self.update_status_label = QLabel()
+        self.update_status_label.setWordWrap(True)
+        self.update_status_label.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
+        update_form.addRow("当前版本", self.current_version_label)
+        update_form.addRow("自动检查", self.auto_check_updates)
+        update_form.addRow("更新通道", self.update_channel_combo)
+        update_form.addRow("检查状态", self.update_status_label)
+        update_layout.addLayout(update_form)
+
+        update_actions = QHBoxLayout()
+        update_actions.setContentsMargins(0, 0, 0, 0)
+        update_actions.setSpacing(8)
+        self.check_updates_button = QPushButton("检查更新")
+        self.check_updates_button.clicked.connect(self._check_updates)
+        self.skip_update_button = QPushButton("跳过当前版本")
+        self.skip_update_button.clicked.connect(self._skip_current_update)
+        update_actions.addWidget(self.check_updates_button)
+        update_actions.addWidget(self.skip_update_button)
+        update_actions.addStretch(1)
+        update_layout.addLayout(update_actions)
+
         self.feedback = QLabel()
         self.feedback.setWordWrap(True)
         self.feedback.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
@@ -126,9 +174,29 @@ class SettingsWindow(QDialog):
         root.addLayout(picker_row)
         root.addWidget(self.credentials_card, 1)
         root.addLayout(global_form)
+        root.addWidget(self.update_card)
         root.addWidget(self.feedback)
         root.addLayout(actions)
         self._load_values()
+        self._bind_update_controller()
+
+    def _bind_update_controller(self) -> None:
+        if self.update_controller is None:
+            self.current_version_label.setText("v开发模式")
+            self.update_status_label.setText("当前窗口未接入更新控制器。")
+            self.skip_update_button.setEnabled(False)
+            return
+        self.current_version_label.setText(self.update_controller.version_text())
+        self.update_controller.status_changed.connect(self._set_update_status)
+        self.update_controller.latest_release_changed.connect(self._on_latest_release_changed)
+        self._set_update_status(self.update_controller.status_text())
+        self._on_latest_release_changed(self.update_controller.latest_release())
+
+    def _set_update_status(self, text: str) -> None:
+        self.update_status_label.setText(text)
+
+    def _on_latest_release_changed(self, release) -> None:
+        self.skip_update_button.setEnabled(release is not None)
 
     def _on_provider_changed(self, _index: int) -> None:
         self._remember_visible_credentials()
@@ -217,6 +285,10 @@ class SettingsWindow(QDialog):
         values = config_manager.load_config()
         self.refresh_seconds.setValue(max(5, int(values.get("REFRESH_INTERVAL", 60_000)) // 1000))
         self.edge_hide_check.setChecked(bool(values.get("EDGE_HIDE_ENABLED", True)))
+        self.auto_check_updates.setChecked(bool(values.get("UPDATE_AUTO_CHECK_ENABLED", True)))
+        update_channel = str(values.get("UPDATE_CHANNEL", "stable"))
+        update_index = max(0, self.update_channel_combo.findData(update_channel))
+        self.update_channel_combo.setCurrentIndex(update_index)
         active_id = str(values.get("ACTIVE_PROVIDER", "")).lower()
         target_index = 0
         for index in range(self.provider_combo.count()):
@@ -232,6 +304,8 @@ class SettingsWindow(QDialog):
             "REFRESH_INTERVAL": self.refresh_seconds.value() * 1000,
             "ACTIVE_PROVIDER": str(self.provider_combo.currentData() or ""),
             "EDGE_HIDE_ENABLED": self.edge_hide_check.isChecked(),
+            "UPDATE_AUTO_CHECK_ENABLED": self.auto_check_updates.isChecked(),
+            "UPDATE_CHANNEL": str(self.update_channel_combo.currentData() or "stable"),
         }
         # Persist credentials for all registered providers. The currently
         # selected provider is read from the on-screen inputs; other
@@ -251,6 +325,18 @@ class SettingsWindow(QDialog):
                 else:
                     values[key] = str(existing.get(key, ""))
         return values
+
+    def _check_updates(self) -> None:
+        if self.update_controller is None:
+            self._set_update_status("当前运行环境未启用在线更新。")
+            return
+        self.update_controller.check_for_updates(manual=True, parent=self)
+
+    def _skip_current_update(self) -> None:
+        if self.update_controller is None:
+            self._set_update_status("当前运行环境未启用在线更新。")
+            return
+        self.update_controller.skip_available_version(self)
 
     def _save(self) -> None:
         values = self._values()
@@ -272,6 +358,8 @@ class SettingsWindow(QDialog):
         self.feedback.setStyleSheet(f"color: {C_GREEN};")
         active_id = str(values.get("ACTIVE_PROVIDER", ""))
         self.feedback.setText(f"已使用 {active_id or '默认'} 作为数据来源，配置已保存。")
+        if self.update_controller is not None:
+            self.update_controller.reload_cached_release()
         if self.on_saved:
             self.on_saved()
 

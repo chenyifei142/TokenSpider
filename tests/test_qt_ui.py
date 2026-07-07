@@ -10,6 +10,7 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit, QToolButton
 
+import config_manager
 from data.store import TokenData
 from ui.geometry import WorkArea
 from ui.qt_panel import MainPanel, StatisticsCard, TrendCard, format_money_axis, format_token_axis
@@ -529,3 +530,19 @@ def test_settings_keep_unsaved_provider_drafts_when_switching():
         assert window._provider_widgets["AUTH"].text() == "draft-token"
         assert window._provider_widgets["AUTH"].echoMode() == QLineEdit.EchoMode.Password
         window.close()
+
+
+def test_settings_window_exposes_update_controls_without_controller():
+    with (
+        patch("ui.qt_settings.config_manager.load_config", return_value=config_manager.all_config()),
+        patch("ui.qt_settings.config_manager.all_config", return_value=config_manager.all_config()),
+    ):
+        window = SettingsWindow()
+
+    assert window.current_version_label.text() == "v开发模式"
+    assert window.auto_check_updates.isChecked() is True
+    assert window.update_channel_combo.currentData() == "stable"
+    assert window.check_updates_button.text() == "检查更新"
+    assert not window.skip_update_button.isEnabled()
+    assert window.update_status_label.text()
+    window.close()

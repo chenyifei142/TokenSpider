@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
+from app_identity import APP_DISPLAY_NAME
 from ui.qt_theme import app_icon
 
 
@@ -12,7 +13,8 @@ class SystemTray(QSystemTrayIcon):
     def __init__(self, app):
         super().__init__(app_icon(64), app.widget)
         self.app = app
-        self.setToolTip("TokenSpider - LLM 用量监控")
+        self.setToolTip(f"{APP_DISPLAY_NAME} - LLM 用量监控")
+
         menu = QMenu()
         visible = QAction("显示/隐藏", menu)
         visible.triggered.connect(app.widget.set_visible_from_tray)

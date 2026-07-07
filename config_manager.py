@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-APP_NAME = "TokenSpider"
+from app_identity import APP_STORAGE_NAME
+
+APP_NAME = APP_STORAGE_NAME
 
 
 SECRET_KEYS = (
@@ -48,6 +50,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "TEXT_COLOR": "#edf4ff",
     "ACTIVE_PROVIDER": "deepseek",
     "EDGE_HIDE_ENABLED": True,
+    "UPDATE_AUTO_CHECK_ENABLED": True,
+    "UPDATE_CHANNEL": "stable",
+    "UPDATE_SKIPPED_VERSION": "",
 }
 FIELD_META: dict[str, dict[str, Any]] = {
     **{key: {"kind": "text", "secret": key in SECRET_KEYS} for key in DEFAULT_CONFIG},
@@ -58,6 +63,7 @@ FIELD_META: dict[str, dict[str, Any]] = {
     "ACCENT_COLOR": {"kind": "color"},
     "TEXT_COLOR": {"kind": "color"},
     "EDGE_HIDE_ENABLED": {"kind": "bool"},
+    "UPDATE_AUTO_CHECK_ENABLED": {"kind": "bool"},
 }
 
 
@@ -79,6 +85,10 @@ WIDGET_STATE_PATH = CONFIG_DIR / "widget-state.json"
 PANEL_LAYOUT_PATH = CONFIG_DIR / "panel-layout.json"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 LOG_PATH = CONFIG_DIR / "TokenSpider.log"
+UPDATE_STATE_PATH = CONFIG_DIR / "update-state.json"
+UPDATE_CACHE_DIR = CONFIG_DIR / "updates"
+PENDING_UPDATE_CLEANUP_PATH = CONFIG_DIR / "pending-update-cleanup.json"
+UPDATER_LOG_PATH = CONFIG_DIR / "TokenScopeUpdater.log"
 LEGACY_CONFIG_PATH = app_dir() / "config.py"
 _config: dict[str, Any] = DEFAULT_CONFIG.copy()
 _logger_ready = False
@@ -281,6 +291,10 @@ def validate_config(values: dict[str, Any]) -> dict[str, Any]:
     if active_provider not in {"deepseek", "mimo"}:
         raise ValueError("ACTIVE_PROVIDER 必须是 deepseek 或 mimo")
     merged["ACTIVE_PROVIDER"] = active_provider
+    update_channel = str(merged.get("UPDATE_CHANNEL", "stable")).strip().lower()
+    if update_channel not in {"stable", "prerelease"}:
+        raise ValueError("UPDATE_CHANNEL must be stable or prerelease")
+    merged["UPDATE_CHANNEL"] = update_channel
     # Provider 凭据会随请求发送，因此自定义地址至少必须是完整的 HTTP(S) URL；
     # 是否信任非官方主机由设置窗口在保存前再次向用户确认。
     for key in FIELD_META:
@@ -390,6 +404,44 @@ def save_panel_layout_state(values: dict[str, Any]) -> None:
         _write_json(PANEL_LAYOUT_PATH, values)
     except OSError:
         logger().warning("Panel layout state could not be saved")
+
+
+def updates_dir() -> Path:
+    UPDATE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return UPDATE_CACHE_DIR
+
+
+def load_update_state() -> dict[str, Any]:
+    try:
+        value = json.loads(UPDATE_STATE_PATH.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
+
+
+def save_update_state(values: dict[str, Any]) -> None:
+    current = load_update_state()
+    current.update(values)
+    _write_json(UPDATE_STATE_PATH, current)
+
+
+def load_pending_update_cleanup() -> dict[str, Any]:
+    try:
+        value = json.loads(PENDING_UPDATE_CLEANUP_PATH.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
+
+
+def save_pending_update_cleanup(values: dict[str, Any]) -> None:
+    _write_json(PENDING_UPDATE_CLEANUP_PATH, values)
+
+
+def clear_pending_update_cleanup() -> None:
+    try:
+        PENDING_UPDATE_CLEANUP_PATH.unlink(missing_ok=True)
+    except OSError:
+        logger().warning("Pending update cleanup manifest could not be removed")
 
 
 def load_config() -> dict[str, Any]:
