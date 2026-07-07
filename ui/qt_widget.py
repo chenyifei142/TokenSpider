@@ -236,6 +236,8 @@ class FloatingWidget(QWidget):
             self._expand_vertical = vertical
             self.clearMask()
             self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, False)
+            # 展开面板时去掉置顶标志，避免面板窗口压在其它应用上面。
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
             self._arrange_expanded()
             self.panel.show()
             self.setFixedSize(width, height)
@@ -277,6 +279,8 @@ class FloatingWidget(QWidget):
             # Compact mode remains clickable but cannot take keyboard focus away
             # from the application the user is currently working in.
             self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
+            # 收回悬浮球时恢复置顶标志，让悬浮球始终浮在其它窗口之上。
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
             self.clearMask()
             self.show()
             self._apply_native_window_shape(compact=True)
@@ -297,14 +301,10 @@ class FloatingWidget(QWidget):
         return super().event(event)
 
     def _collapse_after_deactivation(self) -> None:
-        if (
-            self._expanded
-            and not self._transitioning
-            and not self._drag_started
-            and not self._has_settings_child()
-            and not self.isActiveWindow()
-        ):
-            self.collapse_panel()
+        # 面板展开时，用户点击其它应用是正常操作，不应自动回收面板；
+        # 只有显式的关闭按钮、ESC 或点击悬浮球才触发回收。
+        # 此方法保留为空壳，供未来需要恢复自动回收行为时使用。
+        pass
 
     def _has_settings_child(self) -> bool:
         return bool(self._settings_window and self._settings_window.isVisible())
@@ -594,6 +594,9 @@ class FloatingWidget(QWidget):
                 on_saved=self._on_config_saved,
                 update_controller=self._update_controller,
             )
+            # 设置窗口作为普通对话框，不应继承主窗口的置顶标志；
+            # 否则会和悬浮球一起把其它应用压在下面。
+            self._settings_window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
         self._settings_window.show()
         self._settings_window.raise_()
         self._settings_window.activateWindow()

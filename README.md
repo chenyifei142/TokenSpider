@@ -8,7 +8,7 @@
 <p align="center">
   <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&amp;logoColor=white">
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&amp;logoColor=white">
-  <img alt="Version 1.3.5" src="https://img.shields.io/badge/version-1.3.5-2f6fe4">
+  <img alt="Version 1.3.6" src="https://img.shields.io/badge/version-1.3.6-2f6fe4">
 </p>
 
 TokenSpider 是一个面向 Windows 的 AI 平台用量监控工具。程序常驻系统托盘，以悬浮球展示核心数据；点击后可展开完整面板，查看余额、今日与本周用量、费用趋势、模型统计和过去一年的活跃记录。支持 DeepSeek 与 小米 Mimo 两个平台，可在设置中切换。
@@ -74,7 +74,7 @@ python main.py
 2. 打开「设置」 → 在「数据来源」下拉列表中选择 **DeepSeek** 或 **小米 MiMo**。
 3. 填写对应平台的凭据：
    - **DeepSeek**：Bearer Token 或 Cookie；如有官方 API Key 可一并填写
-   - **小米 MiMo**：登录 `platform.xiaomimimo.com` 后复制浏览器请求中的**完整 Cookie**（通常包含 `api-platform_serviceToken`、`userId`、`api-platform_slh`、`api-platform_ph`）；Cookie 中的 `api-platform_ph` 会被自动提取并回填到对应输入框，无需手动复制粘贴第二次
+   - **小米 MiMo**：登录 `platform.xiaomimimo.com` 后复制浏览器请求中的**完整 Cookie**（通常包含 `api-platform_serviceToken`、`userId`、`api-platform_slh`、`api-platform_ph`）；Cookie 中的 `api-platform_ph` 会被自动提取并回填到对应输入框，无需手动复制粘贴第二次。也可直接在凭据区域点击「一键获取 MiMo Cookie」，按提示拉起本机 Chrome 完成登录后回填。
 4. 保存设置并执行刷新。
 
 默认刷新间隔为 60 秒。切换平台后，面板会立即进入该平台自己的未配置、加载、成功或失败状态，不会短暂展示上一平台数据。
@@ -145,11 +145,25 @@ TokenSpider/
 ## 故障排查
 
 - **提示尚未配置**：在设置中选择提供商（DeepSeek / 小米 MiMo）并填写对应凭据。
-- **提示凭据失效**：重新获取并保存当前账户的 Token 或 Cookie；**小米 MiMo 需同时更新 `api-platform_ph`，且程序会从粘贴的整段 Cookie 中自动提取 `api-platform_ph`，无需手动复制到独立输入框**。
+- **提示凭据失效**：重新获取并保存当前账户的 Token 或 Cookie；**小米 MiMo 需同时更新 `api-platform_ph`，且程序会从粘贴的整段 Cookie 中自动提取 `api-platform_ph`，无需手动复制到独立输入框**。也可在凭据区域点击「一键获取 MiMo Cookie」，由程序拉起本机浏览器读取 Cookie。
 - **提示请求过于频繁或平台风控拒绝请求**：等待一段时间后再手动刷新；不要持续缩短刷新间隔。
 - **数据暂时没有更新**：程序会继续显示上一次成功获取的缓存，可查看 `%APPDATA%\TokenSpider\TokenSpider.log` 获取详细信息。
 - **程序没有出现窗口**：检查系统托盘；TokenSpider 只允许一个实例运行。
 - **大数字显示过长**：≥ 1 亿的 Token 会以「亿」为单位显示，无需额外处理。
+
+## v1.3.6
+
+- 设置中选择小米 MiMo 时，凭据区新增「一键获取 MiMo Cookie」与「完成采集」，程序通过 CDP 协议拉起本机 Chrome，在用户登录 MiMo 控制台后自动读取 Cookie 并回填到输入框，避免反复复制粘贴。
+- 一键获取使用独立 Chrome 进程（``--user-data-dir`` 指向 ``%APPDATA%/TokenSpider/mimo-chrome``），不会影响用户平时的浏览会话；若未识别到 Chrome，会在状态提示中给出可执行路径配置位置。
+- 修复 CDP WebSocket 握手在 ``--app`` 模式下因响应头文案差异而被误判为失败的问题：状态码改为 ``101`` 匹配；并放宽对 target 类型的限制，同时接受 ``page`` / ``app`` / ``background_page`` / ``other``。
+- 改用 ``Network.getAllCookies`` 获取整个浏览器上下文中的 Cookie，避免仅拿当前页面域的 Cookie 时为空。
+- 采集完成后改用 CDP 的 ``Browser.close`` 让 Chrome 自行优雅退出，确保本次登录态写入独立用户数据目录，后续再次点击「一键获取」时可直接使用已登录会话；仅在浏览器 10 秒内仍未退出时回退 ``kill()``，防止进程泄漏。
+- 获取 Cookie 后在设置面板里同时把 Cookie 与 ``api-platform_ph`` 填到对应输入框，并把值同步到内部草稿，保证「保存」时生效；不再因为输入框已有旧值而跳过回填。
+- ``_format_cookie_string`` 放宽了 ``domain`` 过滤，允许 ``xiaomimimo.com`` 任意子域，并对 ``api-platform_ph`` 值去外层引号；``_url`` 在拼接 ``api-platform_ph`` 前同样会去引号，避免把 ``"`` 带进去导致 404。
+- 新增 `MiMoProvider.normalize_cookie / extract_cookie_value / _cdp_send_text / acquire_cookie_via_chrome / describe_acquire_error` 方法，便于外部调用。
+- 补充 ``tests/test_providers.py`` 中针对 Cookie 规范化、``api-platform_ph`` 提取、target 选取逻辑、``_cdp_send_text`` 容错和未识别 Chrome 时错误信息的回归测试（共 18 项）。
+- 修复面板和设置窗口继承悬浮球的 ``WindowStaysOnTopHint`` 标志导致所有应用被压在下面的问题：展开面板和打开设置时去掉置顶，收回悬浮球时恢复置顶。
+- 修复展开面板后点击其它应用时面板被自动回收的问题：移除 ``WindowDeactivate`` 触发的自动 ``collapse_panel`` 逻辑，面板回收仅通过 ESC 键、关闭按钮或点击悬浮球触发。
 
 ## v1.3.5
 

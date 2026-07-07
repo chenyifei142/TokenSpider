@@ -3,11 +3,27 @@
 Uses the platform API at ``platform.xiaomimimo.com`` to fetch balance,
 monthly usage summary, and per-day usage details — all authenticated via
 browser cookie.
+
+A ``acquire_cookie_via_chrome`` helper is provided so the settings dialog
+can launch the user's own Chrome/Edge and let them log in through the
+browser, then return the required ``api-platform_*`` cookie strings
+directly back into the credential UI. That helper uses only the Python
+standard library (``subprocess``, ``http.client``, ``socket``, ``json``)
+and does not require Playwright or any third-party package.
 """
 
 from __future__ import annotations
 
+import http.client
+import json
+import os
+import socket
+import struct
+import subprocess
+import threading
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -22,6 +38,23 @@ from api.providers.base import (
 )
 
 _MIMO_PLATFORM = "https://platform.xiaomimimo.com"
+# 浏览器获取 Cookie 时打开的目标页面。
+MIMO_ACQUIRE_URL = f"{_MIMO_PLATFORM}/console/usage"
+# 需要从浏览器上下文中提取的 cookie 名称；与 cookie_tool 保持一致。
+MIMO_ACQUIRE_KEYS = (
+    "api-platform_ph",
+    "api-platform_serviceToken",
+    "api-platform_slh",
+    "userId",
+)
+# 匹配 ``domain`` 字段；MiMo 平台 cookie 落在平台域名或其子域上。
+MIMO_ACQUIRE_DOMAINS = ("platform.xiaomimimo.com", ".xiaomimimo.com", ".platform.xiaomimimo.com")
+# CDP 随机调试端口探测区间。
+_MIMO_CDP_PORT_RANGE = range(9222, 9323)
+# CDP 握手超时（秒），避免线程被阻塞太久。
+_MIMO_CDP_TIMEOUT_SECONDS = 10
+# Cookie 采集总超时（秒），兜底防止 worker 长时间不退出。
+_MIMO_ACQUIRE_TOTAL_TIMEOUT_SECONDS = 180
 
 
 class MiMoProvider(Provider):
@@ -100,6 +133,465 @@ class MiMoProvider(Provider):
             or str(config_manager.get("MIMO_API_KEY", "")).strip()
         )
 
+    # --------------------------------------------------------- chrome helpers
+    @staticmethod
+    def default_user_data_dir() -> str:
+        """返回浏览器独立用户数据目录（默认 ``%APPDATA%/TokenSpider/mimo-chrome``）。"""
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return str(Path(base) / "TokenSpider" / "mimo-chrome")
+
+    @staticmethod
+    def find_chrome_executable(use_edge: bool = False) -> str:
+        """探测本机 Chrome（或 Edge）可执行文件路径。找不到返回空串。"""
+        candidates: list[str] = []
+        # 优先 Windows 注册表：App Paths 里记录了常见浏览器路径。
+        try:
+            import winreg  # 仅 Windows 可用，PyInstaller 打包后仍可用。
+            app_name = "msedge.exe" if use_edge else "chrome.exe"
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{app_name}",
+            ) as key:
+                path, _ = winreg.QueryValueEx(key, "")
+                if path and os.path.isfile(path):
+                    candidates.append(path)
+        except (FileNotFoundError, OSError, PermissionError):
+            pass
+        except Exception:
+            pass
+        # 常见安装位置兜底；在 Windows 10/11 上 Chrome 可能装在 Program Files
+        # 或 %LOCALAPPDATA%，Edge 装在 Program Files。
+        local_appdata = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        program_files = [
+            os.environ.get("ProgramFiles", r"C:\Program Files"),
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        ]
+        if use_edge:
+            for base in program_files:
+                candidates.append(str(Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe"))
+        else:
+            for base in program_files:
+                candidates.append(str(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe"))
+            candidates.append(str(Path(local_appdata) / "Google" / "Chrome" / "Application" / "chrome.exe"))
+        for path in candidates:
+            if path and os.path.isfile(path):
+                return path
+        return ""
+
+    @staticmethod
+    def pick_free_cdp_port() -> int:
+        """在 ``_MIMO_CDP_PORT_RANGE`` 里随机选一个空闲端口；找不到返回 -1。"""
+        for port in _MIMO_CDP_PORT_RANGE:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                try:
+                    sock.bind(("127.0.0.1", port))
+                    return port
+                except OSError:
+                    continue
+        return -1
+
+    @staticmethod
+    def _http_json(host: str, port: int, path: str, timeout: float) -> Any:
+        """对调试端口做一次简单 HTTP GET 并返回 JSON。"""
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            data = resp.read()
+        finally:
+            conn.close()
+        if resp.status != 200:
+            raise RuntimeError(f"CDP_HTTP_{resp.status}")
+        try:
+            return json.loads(data.decode("utf-8", errors="replace"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise RuntimeError("CDP_INVALID_JSON") from exc
+
+    @staticmethod
+    def _wait_browser_ready(port: int, stop_event: threading.Event, timeout: float = 15.0) -> None:
+        """等待调试端口返回 200，否则抛 ``RuntimeError``。"""
+        deadline = threading.Event()
+        timer = threading.Timer(timeout, lambda: deadline.set())
+        timer.daemon = True
+        timer.start()
+        try:
+            while not stop_event.is_set() and not deadline.is_set():
+                try:
+                    MiMoProvider._http_json("127.0.0.1", port, "/json/version", 1.0)
+                    return
+                except (OSError, RuntimeError, http.client.HTTPException):
+                    stop_event.wait(0.25)
+            raise RuntimeError("BROWSER_NOT_READY")
+        finally:
+            timer.cancel()
+
+    @staticmethod
+    def _pick_websocket_endpoint(port: int) -> str:
+        """获取 CDP 中可用 target 对应的 WebSocket 端点。
+
+        Chrome 对 ``--app`` 模式可能把 URL 记在 ``page``、``app`` 或
+        ``background_page`` 类型中，因此不能只用 ``type == "page"``。
+        """
+        items = MiMoProvider._http_json("127.0.0.1", port, "/json", _MIMO_CDP_TIMEOUT_SECONDS)
+        if not isinstance(items, list):
+            raise RuntimeError("CDP_UNEXPECTED_JSON")
+        acceptable = {"page", "app", "background_page", "other"}
+        candidate = None
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            kind = entry.get("type")
+            url = entry.get("url") or ""
+            ws = entry.get("webSocketDebuggerUrl")
+            if not ws:
+                continue
+            if kind in acceptable:
+                # 优先挑一个属于目标站点的 target；没有则选第一个可用。
+                if _MIMO_PLATFORM in url:
+                    return str(ws)
+                if candidate is None:
+                    candidate = str(ws)
+        if candidate:
+            return candidate
+        raise RuntimeError("CDP_NO_PAGE_TARGET")
+
+    @staticmethod
+    def _cdp_fetch_cookies_via_ws(ws_url: str) -> list[dict[str, Any]]:
+        """通过 CDP WebSocket 发送 ``Network.getAllCookies`` 并返回 cookies 列表。
+
+        说明
+        ----
+        - Chrome ``--app`` 模式下响应头为 ``101 WebSocket Protocol Handshake``，
+          因此只检查状态码是否为 ``101`` 而不是 ``"101 Switching Protocols"``。
+        - ``Network.getCookies`` 受当前页面域限制，可能返回空；改用
+          ``Network.getAllCookies`` 拿到整个浏览器上下文中的 cookie，与
+          ``cookie_tool`` 中 ``context.cookies()`` 的行为保持一致。
+        """
+        parsed = urlparse(ws_url)
+        if parsed.scheme != "ws" or not parsed.hostname or not parsed.port:
+            raise RuntimeError("CDP_INVALID_WS_URL")
+        host = parsed.hostname
+        port = int(parsed.port)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        # 1) 做 HTTP 升级握手。RFC 6455 允许使用任意 16 字节 base64 串作 key，
+        #    这里采用固定值以避免引入额外依赖。
+        key_b64 = "dGhlIHNhbXBsZSBub25jZQ=="
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key_b64}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+        sock = socket.create_connection((host, port), timeout=_MIMO_CDP_TIMEOUT_SECONDS)
+        try:
+            sock.sendall(request.encode("ascii"))
+            # 读取响应头直到空行。
+            buf = bytearray()
+            while True:
+                chunk = sock.recv(2048)
+                if not chunk:
+                    raise RuntimeError("CDP_WS_HANDSHAKE_FAILED")
+                buf.extend(chunk)
+                if b"\r\n\r\n" in buf:
+                    break
+            head_end = buf.index(b"\r\n\r\n")
+            head_text = buf[:head_end].decode("ascii", errors="replace")
+            # Chrome / Chromium 的响应头形式因版本而异，核心是返回 ``101``。
+            if "101" not in head_text:
+                raise RuntimeError("CDP_WS_HANDSHAKE_FAILED")
+            # 2) 发送一个文本帧，请求 ``Network.getAllCookies``；相比
+            #    ``Network.getCookies``，它不受当前页面域限制，更稳定。
+            payload = json.dumps(
+                {"id": 1, "method": "Network.getAllCookies"},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            # 文本帧：FIN=1, opcode=1, mask=1；使用 7 位长度（对 payload 足够）。
+            payload_len = len(payload)
+            if payload_len > 0xFFFF:
+                raise RuntimeError("CDP_PAYLOAD_TOO_LARGE")
+            header = bytearray()
+            header.append(0x81)  # FIN=1, opcode=1
+            header.append(0x80 | (payload_len & 0x7F))
+            masking_key = bytes(4)  # 零掩码即可
+            header.extend(masking_key)
+            # 客户端按协议必须 mask payload；这里 mask 是 0，mask 操作等价于不改动。
+            masked_payload = bytearray(payload)
+            for i in range(payload_len):
+                masked_payload[i] ^= masking_key[i % 4]
+            sock.sendall(bytes(header) + bytes(masked_payload))
+            # 3) 读取响应帧：期望一个 FIN=1 的文本帧；额外容忍 binary 与 0 长帧。
+            raw = MiMoProvider._recv_exact(sock, 2)
+            first_byte = raw[0]
+            fin = bool(first_byte & 0x80)
+            opcode = first_byte & 0x0F
+            second_byte = raw[1]
+            masked = bool(second_byte & 0x80)
+            length = second_byte & 0x7F
+            if not fin or opcode not in (1, 2):  # 1=text, 2=binary
+                raise RuntimeError("CDP_UNEXPECTED_FRAME")
+            if length == 126:
+                (length,) = struct.unpack(">H", MiMoProvider._recv_exact(sock, 2))
+            elif length == 127:
+                (length,) = struct.unpack(">Q", MiMoProvider._recv_exact(sock, 8))
+            if masked:
+                # 服务端理论上不应 mask；这里仍兼容处理以防万一。
+                key = MiMoProvider._recv_exact(sock, 4)
+            body = MiMoProvider._recv_exact(sock, length)
+            if masked:
+                body = bytes(b ^ key[i % 4] for i, b in enumerate(body))
+            try:
+                result = json.loads(body.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("CDP_INVALID_JSON") from exc
+            if not isinstance(result, dict) or "result" not in result:
+                raise RuntimeError("CDP_UNEXPECTED_RESPONSE")
+            inner = result["result"]
+            # ``Network.getAllCookies`` 的返回字段名是 ``cookies``。
+            if not isinstance(inner, dict) or "cookies" not in inner:
+                raise RuntimeError("CDP_UNEXPECTED_RESPONSE")
+            cookies = inner["cookies"]
+            if not isinstance(cookies, list):
+                raise RuntimeError("CDP_UNEXPECTED_RESPONSE")
+            return cookies
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _recv_exact(sock: socket.socket, n: int) -> bytes:
+        """从 ``sock`` 读 ``n`` 字节，不足则抛。"""
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                raise RuntimeError("CDP_CONN_CLOSED")
+            buf.extend(chunk)
+        return bytes(buf)
+
+    @staticmethod
+    def _format_cookie_string(cookies: list[dict[str, Any]]) -> str:
+        """把 CDP 读回的 cookies 列表按 ``MIMO_ACQUIRE_KEYS`` 顺序拼成一行。
+
+        为避免遗漏 ``api-platform_ph`` 这类可能落在 ``xiaomimimo.com``
+        子域上的 cookie，这里把 ``domain`` 判断放宽为「包含
+        ``xiaomimimo.com`` 的任意子域或主机名」，同时仍然严格按
+        ``MIMO_ACQUIRE_KEYS`` 过滤字段名，避免把无关的第三方 cookie
+        拼进请求头。
+        """
+        name_to_value: dict[str, str] = {}
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                continue
+            name = str(cookie.get("name") or "")
+            if name not in MIMO_ACQUIRE_KEYS:
+                continue
+            domain = str(cookie.get("domain") or "").lower()
+            # 宽松判断：只要包含 xiaomimimo.com 主机部分，就视为来自 MiMo。
+            if domain and "xiaomimimo.com" not in domain:
+                continue
+            value = str(cookie.get("value") or "")
+            # ``api-platform_ph`` 有时会被百分编码；我们在拼到请求头里之前做
+            # 一次去引号处理，但保留原字符串，避免把 ``%2F`` 这类合法编码弄坏。
+            if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+                value = value[1:-1]
+            # 避免被后面的同字段、但值为空的 cookie 覆盖。
+            if value or name not in name_to_value:
+                name_to_value[name] = value
+        parts = [f"{k}={name_to_value.get(k, '')}" for k in MIMO_ACQUIRE_KEYS if k in name_to_value]
+        return "; ".join(parts)
+
+    @staticmethod
+    def _cdp_send_text(ws_url: str, payload: dict[str, Any]) -> None:
+        """建立 WebSocket 握手后发送一个 ``text`` 帧并立即关闭连接。
+
+        仅用于触发 ``Browser.close`` 这类「发送后立即关闭」的 CDP 命令，
+        不读响应；读响应走 ``_cdp_fetch_cookies_via_ws``。
+        """
+        parsed = urlparse(ws_url)
+        if parsed.scheme != "ws" or not parsed.hostname or not parsed.port:
+            return
+        host = parsed.hostname
+        port = int(parsed.port)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+        try:
+            sock = socket.create_connection((host, port), timeout=_MIMO_CDP_TIMEOUT_SECONDS)
+        except OSError:
+            return
+        try:
+            sock.sendall(request.encode("ascii"))
+            buf = bytearray()
+            while True:
+                chunk = sock.recv(2048)
+                if not chunk:
+                    return
+                buf.extend(chunk)
+                if b"\r\n\r\n" in buf:
+                    break
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            body_len = len(body)
+            if body_len > 0xFFFF:
+                return
+            header = bytearray()
+            header.append(0x81)
+            header.append(0x80 | (body_len & 0x7F))
+            header.extend(bytes(4))
+            try:
+                sock.sendall(bytes(header) + body)
+            except OSError:
+                return
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def acquire_cookie_via_chrome(
+        stop_event: threading.Event,
+        use_edge: bool = False,
+        user_data_dir: str | None = None,
+    ) -> str:
+        """拉起本机 Chrome/Edge → 用户登录 → 读回 MiMo cookie。
+
+        说明
+        ----
+        - 为了让 ``--user-data-dir`` 保留登录态，退出浏览器使用 CDP 的
+          ``Browser.close``，让 Chrome 自行优雅退出并把 Cookie 刷盘；
+          仅当它在 10 秒内仍未退出时才回退 ``kill()``，避免进程泄漏。
+        """
+        exe = MiMoProvider.find_chrome_executable(use_edge=use_edge)
+        if not exe:
+            raise RuntimeError("CHROME_NOT_FOUND")
+        if user_data_dir:
+            data_dir = Path(user_data_dir)
+        else:
+            data_dir = Path(MiMoProvider.default_user_data_dir())
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError("USER_DATA_DIR_FAILED") from exc
+        port = MiMoProvider.pick_free_cdp_port()
+        if port < 0:
+            raise RuntimeError("NO_FREE_CDP_PORT")
+        args = [
+            exe,
+            f"--user-data-dir={data_dir}",
+            f"--remote-debugging-port={port}",
+            "--remote-debugging-address=127.0.0.1",
+            "--no-first-run",
+            "--disable-default-apps",
+            f"--app={MIMO_ACQUIRE_URL}",
+        ]
+        startupinfo = None
+        creationflags = 0
+        try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        except AttributeError:
+            startupinfo = None
+        process: subprocess.Popen[Any] | None = None
+        try:
+            process = subprocess.Popen(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+            )
+        except OSError as exc:
+            raise RuntimeError("CHROME_LAUNCH_FAILED") from exc
+        ws_url_for_close: str | None = None
+        try:
+            MiMoProvider._wait_browser_ready(port, stop_event, timeout=15.0)
+            # 等待用户点击『完成采集』；同时带总超时防止进程泄漏。
+            stop_event.wait(timeout=_MIMO_ACQUIRE_TOTAL_TIMEOUT_SECONDS)
+            ws_url = MiMoProvider._pick_websocket_endpoint(port)
+            ws_url_for_close = ws_url
+            cookies = MiMoProvider._cdp_fetch_cookies_via_ws(ws_url)
+            raw = MiMoProvider._format_cookie_string(cookies)
+            if not raw:
+                raise RuntimeError("MIMO_COOKIE_EMPTY")
+            return MiMoProvider.normalize_cookie(raw)
+        except RuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("ACQUIRE_UNEXPECTED") from exc
+        finally:
+            # 先让 Chrome 自己优雅退出（通过 CDP 发 ``Browser.close``），
+            # 这样它会把本次登录态写入 ``user-data-dir``。
+            if ws_url_for_close is not None:
+                try:
+                    MiMoProvider._cdp_send_text(
+                        ws_url_for_close,
+                        {"id": 1, "method": "Browser.close"},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            if process is not None:
+                try:
+                    # 给 Chrome 留一点时间写盘；期间若进程已退出就立即返回。
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.terminate()
+                    except OSError:
+                        pass
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            process.kill()
+                        except OSError:
+                            pass
+                except OSError:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+
+    # ---------------------------------------------------------- chrome errors
+    ACQUIRE_ERROR_MESSAGES = {
+        "CHROME_NOT_FOUND": "未检测到 Chrome 或 Edge，请先安装浏览器，或手动粘贴 Cookie",
+        "USER_DATA_DIR_FAILED": "无法创建浏览器用户数据目录",
+        "NO_FREE_CDP_PORT": "无法分配调试端口（9222~9322）",
+        "CHROME_LAUNCH_FAILED": "浏览器启动失败，请检查权限或安全软件是否拦截",
+        "BROWSER_NOT_READY": "浏览器调试接口未就绪，请稍后重试",
+        "CDP_CONN_CLOSED": "浏览器调试连接意外关闭",
+        "CDP_WS_HANDSHAKE_FAILED": "浏览器调试握手失败",
+        "CDP_INVALID_JSON": "浏览器调试返回非 JSON 响应",
+        "CDP_UNEXPECTED_FRAME": "浏览器调试返回未预期帧类型",
+        "CDP_INVALID_RESPONSE": "浏览器调试返回 cookies 结构异常",
+        "CDP_UNEXPECTED_RESPONSE": "浏览器调试响应字段缺失",
+        "CDP_PAYLOAD_TOO_LARGE": "调试请求体积过大",
+        "CDP_HTTP_404": "调试接口未就绪（404）",
+        "MIMO_COOKIE_EMPTY": "当前浏览器会话尚未登录 MiMo，请登录后再采集",
+        "ACQUIRE_UNEXPECTED": "采集 Cookie 时出现未预期错误",
+    }
+
+    @classmethod
+    def describe_acquire_error(cls, exc: Exception) -> str:
+        code = str(exc) if isinstance(exc, RuntimeError) else "ACQUIRE_UNEXPECTED"
+        return cls.ACQUIRE_ERROR_MESSAGES.get(code, f"采集失败：{code}")
+
     def _base_url(self) -> str:
         custom = str(config_manager.get("MIMO_BASE", "")).strip()
         # 迁移早期版本默认指向 api.xiaomimimo.com；用量/余额端点只在 platform
@@ -118,7 +610,8 @@ class MiMoProvider(Provider):
         if not ph:
             ph = str(config_manager.get("MIMO_API_PLATFORM_PH", "")).strip()
             if ph:
-                ph_decoded = ph.replace("%2F", "/").replace("%3D", "=")
+                # 去外层引号，防止把 """" 拼到请求头里。
+                ph_decoded = ph.strip().strip('"').strip().replace("%2F", "/").replace("%3D", "=")
                 cookie = f'{cookie}; api-platform_ph="{ph_decoded}"'
         return {
             "accept": "*/*",
@@ -146,8 +639,8 @@ class MiMoProvider(Provider):
         """构造完整 URL，并在末尾附加 ``api-platform_ph``。
 
         ``ph`` 直接作为原始查询串附加，避免对用户从浏览器复制的百分
-        比编码（如 ``%2F``）被二次编码。如果 Cookie 中已包含
-        ``api-platform_ph``，则优先使用它，保持与请求头一致。
+        比编码（如 ``%2F``）被二次编码；但会去掉外层双引号，防止
+        拼到 URL 上时把 ``"`` 带进去导致 404。
         """
         base = self._base_url()
         url = f"{base}{path}"
@@ -155,6 +648,9 @@ class MiMoProvider(Provider):
         ph = self.extract_cookie_value(self.normalize_cookie(cookie_raw), "api-platform_ph")
         if not ph:
             ph = str(config_manager.get("MIMO_API_PLATFORM_PH", "")).strip()
+        if ph:
+            # 去引号并修剪空白，防止 URL 出现 "%22" 或空格导致 404。
+            ph = ph.strip().strip('"').strip()
         if ph:
             sep = "&" if "?" in url else "?"
             url = f"{url}{sep}api-platform_ph={ph}"
