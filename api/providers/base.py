@@ -81,6 +81,7 @@ class Provider:
     official_api_hosts: set[str] = set()
     supports_daily_usage = False
     supports_cost = False
+    supports_cookie_acquisition = False
     credential_fields: dict[str, dict[str, Any]] = {}
 
     def is_configured(self) -> bool:

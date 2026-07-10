@@ -247,7 +247,9 @@ class TokenData:
             return copy.deepcopy(snapshot) if snapshot else cls()
 
     @classmethod
-    def fetch(cls, today: date | None = None) -> "TokenData":
+    def fetch(
+        cls, today: date | None = None, lightweight: bool = False
+    ) -> "TokenData":
         current_day = today or date.today()
         providers = list(active_providers())
         if not providers:
@@ -308,19 +310,23 @@ class TokenData:
             if summary_error:
                 per.errors.append(summary_error)
 
-            request_months = months_for_week(current_day)
-            try:
-                for month in history.unsynced_months(
-                    months_for_activity(current_day), provider.id
-                ):
-                    if month in request_months:
-                        continue
-                    request_months.append(month)
-                    if len(request_months) >= len(months_for_week(current_day)) + HISTORY_SYNC_BATCH_SIZE:
-                        break
-            except Exception:
-                config_manager.logger().exception("History sync state read failed for %s", provider.id)
-                per.errors.append(FetchError("LOCAL_STORAGE", "历史缓存", "本地同步状态读取失败"))
+            if lightweight and provider.id == "mimo":
+                # 收起状态的 MiMo 悬浮球只需当前日金额；跳过历史补同步，避免它阻塞可见数值更新。
+                request_months = [(current_day.month, current_day.year)]
+            else:
+                request_months = months_for_week(current_day)
+                try:
+                    for month in history.unsynced_months(
+                        months_for_activity(current_day), provider.id
+                    ):
+                        if month in request_months:
+                            continue
+                        request_months.append(month)
+                        if len(request_months) >= len(months_for_week(current_day)) + HISTORY_SYNC_BATCH_SIZE:
+                            break
+                except Exception:
+                    config_manager.logger().exception("History sync state read failed for %s", provider.id)
+                    per.errors.append(FetchError("LOCAL_STORAGE", "历史缓存", "本地同步状态读取失败"))
 
             try:
                 payloads, payload_errors = provider.fetch_payloads(request_months)

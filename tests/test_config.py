@@ -17,6 +17,16 @@ class ConfigTests(unittest.TestCase):
                 "EDGE_HIDE_ENABLED"
             ]
         )
+        self.assertTrue(
+            config_manager.validate_config({})[
+                "PANEL_AUTO_COLLAPSE_ON_DEACTIVATE"
+            ]
+        )
+        self.assertFalse(
+            config_manager.validate_config(
+                {"PANEL_AUTO_COLLAPSE_ON_DEACTIVATE": "false"}
+            )["PANEL_AUTO_COLLAPSE_ON_DEACTIVATE"]
+        )
         self.assertEqual(
             config_manager.validate_config({"UPDATE_CHANNEL": "prerelease"})["UPDATE_CHANNEL"],
             "prerelease",
@@ -54,6 +64,35 @@ class ConfigTests(unittest.TestCase):
                 custom_values = config_manager._load_public_config()
 
             self.assertEqual(custom_values["WIDGET_COMPACT_SIZE"], 112)
+
+    def test_panel_auto_collapse_setting_round_trips(self):
+        temp_root = Path.cwd() / ".test-appdata" / "tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temp_root) as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(config_manager._public_values(config_manager.DEFAULT_CONFIG)),
+                encoding="utf-8",
+            )
+            old_config = config_manager._config
+            try:
+                with (
+                    patch.object(config_manager, "CONFIG_DIR", root),
+                    patch.object(config_manager, "CONFIG_PATH", config_path),
+                    patch.object(config_manager, "_write_credential"),
+                    patch.object(config_manager, "_read_credential", return_value=""),
+                ):
+                    config_manager._config = config_manager.DEFAULT_CONFIG.copy()
+                    saved = config_manager.save_config(
+                        {"PANEL_AUTO_COLLAPSE_ON_DEACTIVATE": False}
+                    )
+                    loaded = config_manager.load_config()
+
+                self.assertFalse(saved["PANEL_AUTO_COLLAPSE_ON_DEACTIVATE"])
+                self.assertFalse(loaded["PANEL_AUTO_COLLAPSE_ON_DEACTIVATE"])
+            finally:
+                config_manager._config = old_config
 
     def test_backups_exclude_secrets_and_are_limited(self):
         temp_root = Path.cwd() / ".test-appdata" / "tmp"

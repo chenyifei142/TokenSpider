@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 import requests
 
 import config_manager
+from api import browser_cookie
 from api.providers.base import (
     FetchError,
     Provider,
@@ -68,6 +69,7 @@ class MiMoProvider(Provider):
     # 与 DeepSeek 一致聚合 today_cost_cny / today_tokens / daily_usage。
     supports_daily_usage = True
     supports_cost = True
+    supports_cookie_acquisition = True
     credential_fields = {
         "COOKIE": {
             "label": "Cookie",
@@ -126,6 +128,16 @@ class MiMoProvider(Provider):
             if key.strip() == name:
                 return value.strip().strip('"')
         return ""
+
+    @staticmethod
+    def acquired_cookie_values(cookie: str) -> dict[str, str]:
+        normalized = browser_cookie.normalize_cookie(cookie)
+        return {
+            "COOKIE": normalized,
+            "API_PLATFORM_PH": MiMoProvider.extract_cookie_value(
+                normalized, "api-platform_ph"
+            ),
+        }
 
     def is_configured(self) -> bool:
         return bool(
@@ -469,104 +481,16 @@ class MiMoProvider(Provider):
         use_edge: bool = False,
         user_data_dir: str | None = None,
     ) -> str:
-        """拉起本机 Chrome/Edge → 用户登录 → 读回 MiMo cookie。
-
-        说明
-        ----
-        - 为了让 ``--user-data-dir`` 保留登录态，退出浏览器使用 CDP 的
-          ``Browser.close``，让 Chrome 自行优雅退出并把 Cookie 刷盘；
-          仅当它在 10 秒内仍未退出时才回退 ``kill()``，避免进程泄漏。
-        """
-        exe = MiMoProvider.find_chrome_executable(use_edge=use_edge)
-        if not exe:
-            raise RuntimeError("CHROME_NOT_FOUND")
-        if user_data_dir:
-            data_dir = Path(user_data_dir)
-        else:
-            data_dir = Path(MiMoProvider.default_user_data_dir())
-        try:
-            data_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise RuntimeError("USER_DATA_DIR_FAILED") from exc
-        port = MiMoProvider.pick_free_cdp_port()
-        if port < 0:
-            raise RuntimeError("NO_FREE_CDP_PORT")
-        args = [
-            exe,
-            f"--user-data-dir={data_dir}",
-            f"--remote-debugging-port={port}",
-            "--remote-debugging-address=127.0.0.1",
-            "--no-first-run",
-            "--disable-default-apps",
-            f"--app={MIMO_ACQUIRE_URL}",
-        ]
-        startupinfo = None
-        creationflags = 0
-        try:
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        except AttributeError:
-            startupinfo = None
-        process: subprocess.Popen[Any] | None = None
-        try:
-            process = subprocess.Popen(
-                args,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                startupinfo=startupinfo,
-                creationflags=creationflags,
-            )
-        except OSError as exc:
-            raise RuntimeError("CHROME_LAUNCH_FAILED") from exc
-        ws_url_for_close: str | None = None
-        try:
-            MiMoProvider._wait_browser_ready(port, stop_event, timeout=15.0)
-            # 等待用户点击『完成采集』；同时带总超时防止进程泄漏。
-            stop_event.wait(timeout=_MIMO_ACQUIRE_TOTAL_TIMEOUT_SECONDS)
-            ws_url = MiMoProvider._pick_websocket_endpoint(port)
-            ws_url_for_close = ws_url
-            cookies = MiMoProvider._cdp_fetch_cookies_via_ws(ws_url)
-            raw = MiMoProvider._format_cookie_string(cookies)
-            if not raw:
-                raise RuntimeError("MIMO_COOKIE_EMPTY")
-            return MiMoProvider.normalize_cookie(raw)
-        except RuntimeError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("ACQUIRE_UNEXPECTED") from exc
-        finally:
-            # 先让 Chrome 自己优雅退出（通过 CDP 发 ``Browser.close``），
-            # 这样它会把本次登录态写入 ``user-data-dir``。
-            if ws_url_for_close is not None:
-                try:
-                    MiMoProvider._cdp_send_text(
-                        ws_url_for_close,
-                        {"id": 1, "method": "Browser.close"},
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-            if process is not None:
-                try:
-                    # 给 Chrome 留一点时间写盘；期间若进程已退出就立即返回。
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    try:
-                        process.terminate()
-                    except OSError:
-                        pass
-                    try:
-                        process.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        try:
-                            process.kill()
-                        except OSError:
-                            pass
-                except OSError:
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
+        return browser_cookie.acquire_cookie_via_chrome(
+            stop_event,
+            acquire_url=MIMO_ACQUIRE_URL,
+            profile_name="mimo-chrome",
+            allowed_domains=("xiaomimimo.com",),
+            cookie_names=MIMO_ACQUIRE_KEYS,
+            empty_cookie_error="MIMO_COOKIE_EMPTY",
+            use_edge=use_edge,
+            user_data_dir=user_data_dir,
+        )
 
     # ---------------------------------------------------------- chrome errors
     ACQUIRE_ERROR_MESSAGES = {

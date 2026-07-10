@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Union
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -53,40 +54,30 @@ class ConnectionWorker(QThread):
         self.finished_with_data.emit(result)
 
 
-class _MiMoCookieWorker(QThread):
-    """负责实际拉起 Chrome 并通过 CDP 读回 MiMo Cookie。
-
-    线程在空闲状态会在浏览器进程打开后，持续等待主线程设置
-    ``stop_event``。一旦被设置，线程立即读取 cookie 并通过 ``success``
-    信号传出；中途若出现异常，则通过 ``error`` 信号传出错提示。
-    """
+class _CookieAcquireWorker(QThread):
+    """Run the selected provider's browser collection away from the UI thread."""
 
     success = Signal(str)
     error = Signal(str)
 
-    def __init__(self, parent=None, use_edge: bool = False):
+    def __init__(self, provider_cls, parent=None):
         super().__init__(parent)
         import threading
 
         self._stop_event = threading.Event()
-        self._use_edge = use_edge
+        self._provider_cls = provider_cls
 
     def stop_and_collect(self) -> None:
         self._stop_event.set()
 
     def run(self) -> None:
-        from api.providers.mimo import MiMoProvider
-
         try:
-            cookie = MiMoProvider.acquire_cookie_via_chrome(
-                self._stop_event,
-                use_edge=self._use_edge,
-            )
+            cookie = self._provider_cls.acquire_cookie_via_chrome(self._stop_event)
         except RuntimeError as exc:
-            self.error.emit(MiMoProvider.describe_acquire_error(exc))
+            self.error.emit(self._provider_cls.describe_acquire_error(exc))
             return
         except Exception as exc:  # noqa: BLE001
-            self.error.emit(MiMoProvider.describe_acquire_error(exc))
+            self.error.emit(self._provider_cls.describe_acquire_error(exc))
             return
         self.success.emit(cookie)
 
@@ -101,34 +92,36 @@ class SettingsWindow(QDialog):
         super().__init__(parent)
         self.setWindowTitle("TokenSpider 设置")
         self.setModal(False)
-        self.setMinimumWidth(520)
-        self.setMaximumWidth(680)
+        self.setMinimumWidth(560)
+        self.setMaximumWidth(720)
         self.on_saved = on_saved
         self.update_controller = update_controller
         self._worker: ConnectionWorker | None = None
-        self._mimo_cookie_worker: "_MiMoCookieWorker | None" = None
+        self._cookie_acquire_worker: "_CookieAcquireWorker | None" = None
+        self._cookie_acquire_provider_id = ""
         self._rendered_provider_id = ""
         self._provider_widgets: dict[str, Union[QLineEdit, QPlainTextEdit]] = {}
         self._provider_drafts: dict[str, dict[str, str]] = {}
         self._test_config_backup: dict[str, Any] | None = None
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(12)
+        self.tabs = QTabWidget(self)
+
+        # The account tab is the only long page. Keeping the footer outside it
+        # prevents Save/Cancel from scrolling away while users edit Cookies.
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        # 1.3.1 改成滚动容器后，Qt 会让 viewport/content 回退到系统默认底色；
-        # 这里显式继承深色面板背景，避免设置页在 Windows 上出现整块白底。
         self.scroll_area.viewport().setStyleSheet(f"background: {C_PANEL};")
-        root.addWidget(self.scroll_area)
         self.content = QWidget()
         self.content.setStyleSheet(f"background: {C_PANEL};")
         self.scroll_area.setWidget(self.content)
         content_layout = QVBoxLayout(self.content)
-        content_layout.setContentsMargins(24, 20, 24, 20)
+        content_layout.setContentsMargins(6, 4, 6, 8)
         content_layout.setSpacing(14)
-        title = QLabel("运行配置")
+        title = QLabel("账户与凭据")
         title.setStyleSheet("font-size: 18px; font-weight: 700;")
 
         # Provider picker — single dropdown.
@@ -155,23 +148,58 @@ class SettingsWindow(QDialog):
         self.credentials_layout.setSpacing(10)
         self._provider_widgets: dict[str, QLineEdit] = {}
 
-        # Global: refresh interval + edge-hide toggle.
-        global_form = QFormLayout()
-        global_form.setHorizontalSpacing(16)
-        global_form.setVerticalSpacing(8)
+        connection_actions = QHBoxLayout()
+        self.test_button = QPushButton("测试连接")
+        self.test_button.clicked.connect(self._test_connection)
+        connection_actions.addWidget(self.test_button)
+        connection_actions.addStretch(1)
+        self.connection_feedback = QLabel()
+        self.connection_feedback.setWordWrap(True)
+        self.connection_feedback.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
+
+        content_layout.addWidget(title)
+        content_layout.addLayout(picker_row)
+        content_layout.addWidget(self.credentials_card)
+        content_layout.addLayout(connection_actions)
+        content_layout.addWidget(self.connection_feedback)
+        content_layout.addStretch(1)
+        self.tabs.addTab(self.scroll_area, "账户与凭据")
+
+        runtime_page = QWidget()
+        runtime_layout = QVBoxLayout(runtime_page)
+        runtime_layout.setContentsMargins(6, 8, 6, 8)
+        runtime_layout.setSpacing(14)
+        runtime_title = QLabel("运行行为")
+        runtime_title.setStyleSheet("font-size: 18px; font-weight: 700;")
+        runtime_layout.addWidget(runtime_title)
+        runtime_hint = QLabel("控制数据刷新，以及悬浮球和面板在桌面的显示方式。")
+        runtime_hint.setWordWrap(True)
+        runtime_hint.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
+        runtime_layout.addWidget(runtime_hint)
+        runtime_card = QFrame()
+        runtime_card.setObjectName("settingsCard")
+        runtime_layout.addWidget(runtime_card)
+        runtime_form = QFormLayout(runtime_card)
+        runtime_form.setContentsMargins(_CARD_PADDING, 14, _CARD_PADDING, 14)
+        runtime_form.setHorizontalSpacing(16)
+        runtime_form.setVerticalSpacing(10)
         self.refresh_seconds = QSpinBox()
         self.refresh_seconds.setRange(5, 3600)
         self.refresh_seconds.setSuffix(" 秒")
-        global_form.addRow("刷新间隔", self.refresh_seconds)
+        runtime_form.addRow("刷新间隔", self.refresh_seconds)
         self.edge_hide_check = QCheckBox("贴边自动隐藏")
         self.edge_hide_check.setToolTip("拖拽悬浮球到屏幕边缘后自动隐藏，鼠标移入时显示")
-        global_form.addRow("贴边隐藏", self.edge_hide_check)
+        runtime_form.addRow("贴边隐藏", self.edge_hide_check)
+        self.panel_auto_collapse_check = QCheckBox("点击面板外部时自动收起")
+        self.panel_auto_collapse_check.setToolTip(
+            "点击其它应用使面板失焦时收起面板并显示悬浮球"
+        )
+        runtime_form.addRow("面板自动收起", self.panel_auto_collapse_check)
+        runtime_layout.addStretch(1)
+        self.tabs.addTab(runtime_page, "运行行为")
 
         self.update_card = QFrame()
-        self.update_card.setObjectName("updateCard")
-        self.update_card.setStyleSheet(
-            "QFrame#updateCard { border: 1px solid #e5e7eb; border-radius: 10px; }"
-        )
+        self.update_card.setObjectName("settingsCard")
         update_layout = QVBoxLayout(self.update_card)
         update_layout.setContentsMargins(_CARD_PADDING, 14, _CARD_PADDING, 14)
         update_layout.setSpacing(10)
@@ -208,30 +236,33 @@ class SettingsWindow(QDialog):
         update_actions.addStretch(1)
         update_layout.addLayout(update_actions)
 
-        self.feedback = QLabel()
-        self.feedback.setWordWrap(True)
-        self.feedback.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
+        update_page = QWidget()
+        update_page_layout = QVBoxLayout(update_page)
+        update_page_layout.setContentsMargins(6, 8, 6, 8)
+        update_page_layout.setSpacing(14)
+        update_title = QLabel("软件更新")
+        update_title.setStyleSheet("font-size: 18px; font-weight: 700;")
+        update_page_layout.addWidget(update_title)
+        update_page_layout.addWidget(self.update_card)
+        update_page_layout.addStretch(1)
+        self.tabs.addTab(update_page, "软件更新")
 
+        root.addWidget(self.tabs, 1)
+        self.save_feedback = QLabel()
+        self.save_feedback.setWordWrap(True)
+        self.save_feedback.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
+        root.addWidget(self.save_feedback)
         actions = QHBoxLayout()
-        self.test_button = QPushButton("测试连接")
-        self.test_button.clicked.connect(self._test_connection)
         cancel = QPushButton("取消")
         cancel.clicked.connect(self.reject)
         save = QPushButton("保存并生效")
         save.setObjectName("primaryButton")
         save.clicked.connect(self._save)
-        actions.addWidget(self.test_button)
         actions.addStretch(1)
         actions.addWidget(cancel)
         actions.addWidget(save)
-
-        content_layout.addWidget(title)
-        content_layout.addLayout(picker_row)
-        content_layout.addWidget(self.credentials_card, 1)
-        content_layout.addLayout(global_form)
-        content_layout.addWidget(self.update_card)
-        content_layout.addWidget(self.feedback)
-        content_layout.addLayout(actions)
+        root.addLayout(actions)
+        self.tabs.currentChanged.connect(lambda _index: self._sync_window_size())
         self._load_values()
         self._bind_update_controller()
         self._sync_window_size()
@@ -263,9 +294,21 @@ class SettingsWindow(QDialog):
         provider_id = self.provider_combo.currentData()
         self._render_credentials(provider_id)
 
+    def open_provider(self, provider_id: str, start_cookie_acquisition: bool = False) -> None:
+        """Focus a provider and optionally begin the browser flow from a tray alert."""
+
+        index = self.provider_combo.findData(provider_id)
+        if index >= 0:
+            self.provider_combo.setCurrentIndex(index)
+        self.tabs.setCurrentIndex(0)
+        if start_cookie_acquisition:
+            # Let the provider switch finish rendering before the worker reads its controls.
+            QTimer.singleShot(0, self._begin_cookie_acquire)
+
     def _sync_window_size(self) -> None:
         self.content.adjustSize()
-        content_size = self.content.sizeHint()
+        self.tabs.adjustSize()
+        content_size = self.tabs.sizeHint()
         screen = self.screen() or QGuiApplication.primaryScreen()
         if screen is not None:
             # Win10 在高缩放或任务栏较高时，可用工作区会明显变小；这里限制
@@ -274,116 +317,81 @@ class SettingsWindow(QDialog):
         else:
             max_height = content_size.height()
         target_width = min(self.maximumWidth(), max(self.minimumWidth(), content_size.width()))
-        target_height = min(content_size.height(), max_height)
+        target_height = min(max(440, content_size.height() + 82), max_height)
         self.resize(target_width, target_height)
 
-    def _begin_mimo_cookie_acquire(self) -> None:
-        """用户点击『一键获取 MiMo Cookie』。
-
-        会尝试识别当前 provider 是否为 mimo，拉起浏览器并等待登录。但真正的
-        读取要等用户点『完成采集』后才进行。
-        """
-        if self._rendered_provider_id != "mimo":
+    def _begin_cookie_acquire(self) -> None:
+        provider_cls = PROVIDERS.get(self._rendered_provider_id)
+        if not provider_cls or not getattr(provider_cls, "supports_cookie_acquisition", False):
             return
-        acquire_button = getattr(self, "_mimo_acquire_button", None)
-        if acquire_button is None:
+        if self._cookie_acquire_worker is not None:
             return
-        acquire_button.setEnabled(False)
-        acquire_button.setText("正在打开浏览器…")
-        status_label = getattr(self, "_mimo_status_label", None)
-        if status_label is not None:
-            status_label.setText("正在打开浏览器，请在浏览器中完成登录。")
-        worker = _MiMoCookieWorker(self, use_edge=False)
-        self._mimo_cookie_worker = worker
-        worker.success.connect(self._apply_mimo_cookie_from_acquired)
-        worker.error.connect(self._mimo_acquire_failed)
-        worker.finished.connect(self._cleanup_mimo_cookie_worker)
+        self._cookie_acquire_provider_id = self._rendered_provider_id
+        self._cookie_acquire_button.setEnabled(False)
+        self._cookie_acquire_button.setText("正在打开浏览器…")
+        self._cookie_acquire_status.setText("正在打开浏览器，请在浏览器中完成登录。")
+        worker = _CookieAcquireWorker(provider_cls, self)
+        self._cookie_acquire_worker = worker
+        worker.success.connect(
+            lambda cookie, provider_id=self._rendered_provider_id: self._apply_acquired_cookie(
+                provider_id, cookie
+            )
+        )
+        worker.error.connect(self._cookie_acquire_failed)
+        worker.finished.connect(self._cleanup_cookie_acquire_worker)
         worker.start()
-        # 等 0.5 秒后切换状态：让浏览器打开后，用户可以点“完成采集”
-        try:
-            from PySide6.QtCore import QTimer
 
-            def _after_poll() -> None:
-                if self._mimo_cookie_worker is worker and worker.isRunning():
-                    finish_button = getattr(self, "_mimo_finish_button", None)
-                    if finish_button is not None:
-                        finish_button.setVisible(True)
-                        finish_button.setEnabled(True)
-                button_text = "浏览器已打开，请登录后回到本窗口点击『完成采集』"
-                status_label = getattr(self, "_mimo_status_label", None)
-                if status_label is not None:
-                    status_label.setText(button_text)
+        def _after_browser_open() -> None:
+            if self._cookie_acquire_worker is worker and worker.isRunning():
+                self._cookie_finish_button.setVisible(True)
+                self._cookie_finish_button.setEnabled(True)
+                self._cookie_acquire_status.setText(
+                    "浏览器已打开，请登录后回到本窗口点击“完成采集”。"
+                )
 
-            QTimer.singleShot(500, _after_poll)
-        except Exception:
-            pass
+        QTimer.singleShot(500, _after_browser_open)
 
-    def _finish_mimo_cookie_acquire(self) -> None:
-        worker = getattr(self, "_mimo_cookie_worker", None)
-        if worker is None:
+    def _finish_cookie_acquire(self) -> None:
+        if self._cookie_acquire_worker is None:
             return
-        status_label = getattr(self, "_mimo_status_label", None)
-        if status_label is not None:
-            status_label.setText("正在读取 Cookie…")
-        worker.stop_and_collect()
+        self._cookie_acquire_status.setText("正在读取 Cookie…")
+        self._cookie_acquire_worker.stop_and_collect()
 
-    def _apply_mimo_cookie_from_acquired(self, cookie_text: str) -> None:
-        if self._rendered_provider_id != "mimo":
+    def _apply_acquired_cookie(self, provider_id: str, cookie_text: str) -> None:
+        provider_cls = PROVIDERS.get(provider_id)
+        if not provider_cls:
             return
-        normalized = _normalize_cookie(cookie_text)
-        if not normalized:
+        values = provider_cls.acquired_cookie_values(cookie_text)
+        if not values:
             return
-        cookie_widget = self._provider_widgets.get("COOKIE")
-        ph_widget = self._provider_widgets.get("API_PLATFORM_PH")
-        # 1) Cookie 输入框：直接填（覆盖旧值），保持用户在浏览器里拿到的最新会话。
-        if cookie_widget is not None:
-            if isinstance(cookie_widget, QPlainTextEdit):
-                cookie_widget.setPlainText(normalized)
-            else:
-                cookie_widget.setText(normalized)
-        # 2) api-platform_ph 输入框：无论原来是否有值，都从 cookie 里解析一次
-        # 并填入，确保保存的 URL query 和请求头一致。
-        ph_value = _extract_cookie_value(normalized, "api-platform_ph")
-        if ph_widget is not None:
-            if isinstance(ph_widget, QPlainTextEdit):
-                ph_widget.setPlainText(ph_value)
-            else:
-                ph_widget.setText(ph_value)
-        # 3) 同步写入 provider_drafts，防止「用户没有再次修改输入框」时保存走旧值。
-        draft = self._provider_drafts.setdefault("mimo", {})
-        if cookie_widget is not None:
-            draft["COOKIE"] = normalized
-        if ph_widget is not None:
-            draft["API_PLATFORM_PH"] = ph_value
-        acquire_button = getattr(self, "_mimo_acquire_button", None)
-        if acquire_button is not None:
-            acquire_button.setEnabled(True)
-            acquire_button.setText("一键获取 MiMo Cookie")
-        finish_button = getattr(self, "_mimo_finish_button", None)
-        if finish_button is not None:
-            finish_button.setVisible(False)
-        status_label = getattr(self, "_mimo_status_label", None)
-        if status_label is not None:
-            status_label.setText("Cookie 已自动填入，请保存设置。")
+        # Save the fresh browser session immediately so changing tabs cannot restore stale drafts.
+        self._provider_drafts.setdefault(provider_id, {}).update(values)
+        if self._rendered_provider_id != provider_id:
+            return
+        for field, value in values.items():
+            widget = self._provider_widgets.get(field)
+            if isinstance(widget, QPlainTextEdit):
+                widget.setPlainText(value)
+            elif isinstance(widget, QLineEdit):
+                widget.setText(value)
+        self._cookie_acquire_button.setEnabled(True)
+        self._cookie_acquire_button.setText("一键获取 Cookie")
+        self._cookie_finish_button.setVisible(False)
+        self._cookie_acquire_status.setText("Cookie 已自动填入，请保存设置。")
 
-    def _mimo_acquire_failed(self, message: str) -> None:
-        acquire_button = getattr(self, "_mimo_acquire_button", None)
-        if acquire_button is not None:
-            acquire_button.setEnabled(True)
-            acquire_button.setText("重试")
-        finish_button = getattr(self, "_mimo_finish_button", None)
-        if finish_button is not None:
-            finish_button.setVisible(False)
-        status_label = getattr(self, "_mimo_status_label", None)
-        if status_label is not None:
-            status_label.setText(str(message))
-        config_manager.logger().warning("mimo cookie acquire failed: %s", str(message))
+    def _cookie_acquire_failed(self, message: str) -> None:
+        if self._rendered_provider_id == getattr(self, "_cookie_acquire_provider_id", ""):
+            self._cookie_acquire_button.setEnabled(True)
+            self._cookie_acquire_button.setText("重试获取 Cookie")
+            self._cookie_finish_button.setVisible(False)
+            self._cookie_acquire_status.setText(str(message))
+        config_manager.logger().warning("cookie acquire failed: %s", str(message))
 
-    def _cleanup_mimo_cookie_worker(self) -> None:
-        worker = getattr(self, "_mimo_cookie_worker", None)
-        if worker is not None and hasattr(worker, "deleteLater"):
+    def _cleanup_cookie_acquire_worker(self) -> None:
+        worker = self._cookie_acquire_worker
+        if worker is not None:
             worker.deleteLater()
-        self._mimo_cookie_worker = None
+        self._cookie_acquire_worker = None
 
     def _remember_visible_credentials(self) -> None:
         if not self._rendered_provider_id:
@@ -423,6 +431,9 @@ class SettingsWindow(QDialog):
             if widget is not None:
                 widget.setParent(None)
         self._provider_widgets = {}
+        self._cookie_acquire_button = None
+        self._cookie_finish_button = None
+        self._cookie_acquire_status = None
 
         provider_cls = PROVIDERS.get(provider_id)
         if not provider_cls:
@@ -453,6 +464,8 @@ class SettingsWindow(QDialog):
                 edit.setText(initial)
             self._provider_widgets[field] = edit
             self.credentials_layout.addWidget(row_widget)
+            if field == "COOKIE" and getattr(provider_cls, "supports_cookie_acquisition", False):
+                self._add_cookie_acquire_row(provider_instance.name)
         # 小米 MiMo：若 Cookie 中已含 ``api-platform_ph`` 则自动回填，
         # 避免用户再去 URL 里复制一次；若用户此前已经填写过
         # ``api-platform_ph`` 或 cookie 里没有，则保持原样。
@@ -477,29 +490,27 @@ class SettingsWindow(QDialog):
                             ph_widget.setPlainText(ph_in_cookie)
                         else:
                             ph_widget.setText(ph_in_cookie)
-            # 在「Cookie」输入框下方加一行：一键获取 MiMo Cookie 按钮与状态提示。
-            if provider_id == "mimo":
-                cookie_row = QWidget()
-                cookie_row_layout = QHBoxLayout(cookie_row)
-                cookie_row_layout.setContentsMargins(0, 4, 0, 0)
-                cookie_row_layout.setSpacing(8)
-                acquire_button = QPushButton("一键获取 MiMo Cookie")
-                acquire_button.setCursor(cookie_row.cursor())
-                acquire_button.clicked.connect(self._begin_mimo_cookie_acquire)
-                self._mimo_acquire_button = acquire_button
-                self._mimo_finish_button = QPushButton("完成采集")
-                self._mimo_finish_button.setVisible(False)
-                self._mimo_finish_button.clicked.connect(self._finish_mimo_cookie_acquire)
-                status_label = QLabel("通过本机浏览器登录后，可一键把 Cookie 填回到上方输入框。")
-                status_label.setWordWrap(True)
-                status_label.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
-                self._mimo_status_label = status_label
-                cookie_row_layout.addWidget(acquire_button)
-                cookie_row_layout.addWidget(self._mimo_finish_button)
-                cookie_row_layout.addWidget(status_label, 1)
-                self.credentials_layout.addWidget(cookie_row)
         self._rendered_provider_id = provider_id
         self._sync_window_size()
+
+    def _add_cookie_acquire_row(self, provider_name: str) -> None:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(8)
+        self._cookie_acquire_button = QPushButton("一键获取 Cookie")
+        self._cookie_acquire_button.setToolTip(f"打开浏览器登录 {provider_name} 后读取 Cookie")
+        self._cookie_acquire_button.clicked.connect(self._begin_cookie_acquire)
+        self._cookie_finish_button = QPushButton("完成采集")
+        self._cookie_finish_button.setVisible(False)
+        self._cookie_finish_button.clicked.connect(self._finish_cookie_acquire)
+        self._cookie_acquire_status = QLabel("通过独立浏览器登录后，可将 Cookie 自动填回此处。")
+        self._cookie_acquire_status.setWordWrap(True)
+        self._cookie_acquire_status.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
+        layout.addWidget(self._cookie_acquire_button)
+        layout.addWidget(self._cookie_finish_button)
+        layout.addWidget(self._cookie_acquire_status, 1)
+        self.credentials_layout.addWidget(row)
 
     @staticmethod
     def _build_credential_row(
@@ -532,6 +543,9 @@ class SettingsWindow(QDialog):
         values = config_manager.load_config()
         self.refresh_seconds.setValue(max(5, int(values.get("REFRESH_INTERVAL", 60_000)) // 1000))
         self.edge_hide_check.setChecked(bool(values.get("EDGE_HIDE_ENABLED", True)))
+        self.panel_auto_collapse_check.setChecked(
+            bool(values.get("PANEL_AUTO_COLLAPSE_ON_DEACTIVATE", True))
+        )
         self.auto_check_updates.setChecked(bool(values.get("UPDATE_AUTO_CHECK_ENABLED", True)))
         update_channel = str(values.get("UPDATE_CHANNEL", "stable"))
         update_index = max(0, self.update_channel_combo.findData(update_channel))
@@ -551,6 +565,7 @@ class SettingsWindow(QDialog):
             "REFRESH_INTERVAL": self.refresh_seconds.value() * 1000,
             "ACTIVE_PROVIDER": str(self.provider_combo.currentData() or ""),
             "EDGE_HIDE_ENABLED": self.edge_hide_check.isChecked(),
+            "PANEL_AUTO_COLLAPSE_ON_DEACTIVATE": self.panel_auto_collapse_check.isChecked(),
             "UPDATE_AUTO_CHECK_ENABLED": self.auto_check_updates.isChecked(),
             "UPDATE_CHANNEL": str(self.update_channel_combo.currentData() or "stable"),
         }
@@ -599,12 +614,12 @@ class SettingsWindow(QDialog):
         try:
             config_manager.save_config(values)
         except Exception as exc:
-            self.feedback.setStyleSheet(f"color: {C_RED};")
-            self.feedback.setText(f"保存失败，配置已回滚：{exc}")
+            self.save_feedback.setStyleSheet(f"color: {C_RED};")
+            self.save_feedback.setText(f"保存失败，配置已回滚：{exc}")
             return
-        self.feedback.setStyleSheet(f"color: {C_GREEN};")
+        self.save_feedback.setStyleSheet(f"color: {C_GREEN};")
         active_id = str(values.get("ACTIVE_PROVIDER", ""))
-        self.feedback.setText(f"已使用 {active_id or '默认'} 作为数据来源，配置已保存。")
+        self.save_feedback.setText(f"已使用 {active_id or '默认'} 作为数据来源，配置已保存。")
         if self.update_controller is not None:
             self.update_controller.reload_cached_release()
         if self.on_saved:
@@ -616,13 +631,13 @@ class SettingsWindow(QDialog):
             self._test_config_backup = config_manager.all_config()
             config_manager._config.update(candidate)
         except Exception as exc:
-            self.feedback.setStyleSheet(f"color: {C_RED};")
-            self.feedback.setText(f"请先修正配置：{exc}")
+            self.connection_feedback.setStyleSheet(f"color: {C_RED};")
+            self.connection_feedback.setText(f"请先修正配置：{exc}")
             return
         self.test_button.setEnabled(False)
         self.test_button.setText("测试中…")
-        self.feedback.setStyleSheet(f"color: {C_SUBTEXT};")
-        self.feedback.setText("正在使用当前输入的凭据测试连接…")
+        self.connection_feedback.setStyleSheet(f"color: {C_SUBTEXT};")
+        self.connection_feedback.setText("正在使用当前输入的凭据测试连接…")
         self._worker = ConnectionWorker(self)
         self._worker.finished_with_data.connect(self._connection_result)
         self._worker.start()
@@ -635,8 +650,8 @@ class SettingsWindow(QDialog):
         self.test_button.setText("测试连接")
         if data.status in {"ok", "partial"}:
             if data.status == "ok":
-                self.feedback.setStyleSheet(f"color: {C_GREEN};")
-                self.feedback.setText("连接成功。")
+                self.connection_feedback.setStyleSheet(f"color: {C_GREEN};")
+                self.connection_feedback.setText("连接成功。")
             else:
                 # Collect all error messages from providers that had issues.
                 error_messages: list[str] = []
@@ -644,12 +659,12 @@ class SettingsWindow(QDialog):
                     for err in per.errors:
                         error_messages.append(f"[{per.provider_name}] {err.message}")
                 detail = "\n".join(error_messages) if error_messages else "未知错误"
-                self.feedback.setStyleSheet(f"color: {C_RED};")
-                self.feedback.setText(f"连接失败：\n{detail}")
+                self.connection_feedback.setStyleSheet(f"color: {C_RED};")
+                self.connection_feedback.setText(f"连接失败：\n{detail}")
         else:
             message = data.errors[0].message if data.errors else "连接失败"
-            self.feedback.setStyleSheet(f"color: {C_RED};")
-            self.feedback.setText(message)
+            self.connection_feedback.setStyleSheet(f"color: {C_RED};")
+            self.connection_feedback.setText(message)
         self._worker = None
 
 

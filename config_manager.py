@@ -50,6 +50,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "TEXT_COLOR": "#edf4ff",
     "ACTIVE_PROVIDER": "deepseek",
     "EDGE_HIDE_ENABLED": True,
+    "PANEL_AUTO_COLLAPSE_ON_DEACTIVATE": True,
     "UPDATE_AUTO_CHECK_ENABLED": True,
     "UPDATE_CHANNEL": "stable",
     "UPDATE_SKIPPED_VERSION": "",
@@ -63,6 +64,7 @@ FIELD_META: dict[str, dict[str, Any]] = {
     "ACCENT_COLOR": {"kind": "color"},
     "TEXT_COLOR": {"kind": "color"},
     "EDGE_HIDE_ENABLED": {"kind": "bool"},
+    "PANEL_AUTO_COLLAPSE_ON_DEACTIVATE": {"kind": "bool"},
     "UPDATE_AUTO_CHECK_ENABLED": {"kind": "bool"},
 }
 

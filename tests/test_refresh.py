@@ -1,13 +1,13 @@
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ["APPDATA"] = str(Path.cwd() / ".test-appdata")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from data.store import FetchError, TokenData
-from PySide6.QtWidgets import QApplication
+from data.store import FetchError, PerProviderData, TokenData
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 from ui.qt_panel import MainPanel
 from ui.qt_widget import FloatingWidget
 
@@ -22,12 +22,41 @@ def widget_stub():
     widget._request_id = 0
     widget._closed = False
     widget._data = TokenData()
+    widget._expanded = False
+    widget._edge_snapped = False
     widget._apply_update = Mock()
     widget._thread_pool = Mock()
+    widget._refresh_timer = Mock()
+    widget.tray = Mock()
+    widget.open_settings = Mock()
     return widget
 
 
 class RefreshTests(unittest.TestCase):
+    def test_panel_and_ball_use_configured_refresh_interval(self):
+        for provider, expanded in (("deepseek", False), ("mimo", False), ("deepseek", True)):
+            widget = widget_stub()
+            widget._expanded = expanded
+            with patch("ui.qt_widget.config_manager.get") as get_config:
+                get_config.side_effect = lambda key, default=None: {
+                    "ACTIVE_PROVIDER": provider,
+                    "REFRESH_INTERVAL": 51_000,
+                }.get(key, default)
+                widget._reschedule_refresh()
+            self.assertEqual(widget._refresh_timer.start.call_args.args[0], 51_000)
+
+    def test_compact_mimo_uses_lightweight_refresh(self):
+        widget = widget_stub()
+
+        with patch("ui.qt_widget.config_manager.get") as get_config:
+            get_config.side_effect = lambda key, default=None: {
+                "ACTIVE_PROVIDER": "mimo",
+            }.get(key, default)
+            widget.refresh()
+
+        task = widget._thread_pool.start.call_args.args[0]
+        self.assertTrue(task._lightweight)
+
     def test_repeated_refresh_runs_once_then_one_pending(self):
         widget = widget_stub()
         widget.refresh()
@@ -44,6 +73,45 @@ class RefreshTests(unittest.TestCase):
         widget._request_id = 2
         widget._finish_refresh(1, TokenData(balance_cny=1))
         self.assertIs(widget._data, current)
+
+    def test_auth_expired_shows_one_tray_notification_until_recovery(self):
+        widget = widget_stub()
+        widget._request_id = 1
+        expired = TokenData(
+            errors=[FetchError("AUTH_EXPIRED", "余额", "Cookie 已失效")]
+        )
+
+        widget._finish_refresh(1, expired)
+        widget._finish_refresh(1, expired)
+
+        self.assertEqual(widget.tray.showMessage.call_count, 1)
+        title, message, icon, timeout = widget.tray.showMessage.call_args.args
+        self.assertEqual(title, "TokenSpider：登录凭据已失效")
+        self.assertIn("Cookie 已失效", message)
+        self.assertIn("点击此通知", message)
+        self.assertEqual(icon, QSystemTrayIcon.MessageIcon.Warning)
+        self.assertEqual(timeout, 10_000)
+
+        widget._finish_refresh(1, TokenData())
+        widget._finish_refresh(1, expired)
+        self.assertEqual(widget.tray.showMessage.call_count, 2)
+
+    def test_auth_expired_notification_click_starts_the_affected_provider_flow(self):
+        widget = widget_stub()
+        widget._request_id = 1
+        expired = TokenData(
+            errors=[FetchError("AUTH_EXPIRED", "MiMo 余额", "Cookie 已失效")],
+            per_provider=[PerProviderData("mimo", "小米 MiMo")],
+        )
+
+        widget._finish_refresh(1, expired)
+        self.assertEqual(widget._auth_expired_provider_id, "mimo")
+
+        widget.handle_auth_expired_notification_click()
+        widget.open_settings.assert_called_once_with(
+            provider_id="mimo", start_cookie_acquisition=True
+        )
+        self.assertIsNone(widget._auth_expired_provider_id)
 
     def test_status_summary_distinguishes_configuration_and_request_errors(self):
         cases = (

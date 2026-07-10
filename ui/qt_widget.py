@@ -21,7 +21,7 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QPalette, QRegion
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QMenu, QWidget
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QMenu, QSystemTrayIcon, QWidget
 
 import config_manager
 from data.store import TokenData
@@ -48,23 +48,24 @@ class FetchSignals(QObject):
 
 
 class FetchTask(QRunnable):
-    def __init__(self, request_id: int):
+    def __init__(self, request_id: int, lightweight: bool = False):
         super().__init__()
         self.request_id = request_id
+        self._lightweight = lightweight
         self.signals = FetchSignals()
 
     @Slot()
     def run(self) -> None:
-        result = _fetch_tokens_safely()
+        result = _fetch_tokens_safely(self._lightweight)
         self.signals.finished.emit(self.request_id, result)
 
 
-def _fetch_tokens_safely() -> TokenData:
+def _fetch_tokens_safely(lightweight: bool = False) -> TokenData:
     """Fetch token data from the active provider and keep the worker thread
     from dying if a provider or config error is raised."""
 
     try:
-        return TokenData.fetch()
+        return TokenData.fetch(lightweight=lightweight)
     except Exception:
         config_manager.logger().exception("Background refresh failed")
         data = TokenData(status="error")
@@ -86,6 +87,8 @@ class FloatingWidget(QWidget):
         self._pending_refresh = False
         self._request_id = 0
         self._closed = False
+        self._auth_expired_notified = False
+        self._auth_expired_provider_id: str | None = None
         self._transitioning = False
         self._expand_horizontal = "right"
         self._expand_vertical = "down"
@@ -236,8 +239,6 @@ class FloatingWidget(QWidget):
             self._expand_vertical = vertical
             self.clearMask()
             self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, False)
-            # 展开面板时去掉置顶标志，避免面板窗口压在其它应用上面。
-            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
             self._arrange_expanded()
             self.panel.show()
             self.setFixedSize(width, height)
@@ -294,6 +295,7 @@ class FloatingWidget(QWidget):
             event.type() == QEvent.Type.WindowDeactivate
             and self._expanded
             and not self._transitioning
+            and bool(config_manager.get("PANEL_AUTO_COLLAPSE_ON_DEACTIVATE", True))
         ):
             # Defer until Qt has finished activating a possible child dialog.
             # This distinguishes a real outside click from opening Settings.
@@ -301,10 +303,16 @@ class FloatingWidget(QWidget):
         return super().event(event)
 
     def _collapse_after_deactivation(self) -> None:
-        # 面板展开时，用户点击其它应用是正常操作，不应自动回收面板；
-        # 只有显式的关闭按钮、ESC 或点击悬浮球才触发回收。
-        # 此方法保留为空壳，供未来需要恢复自动回收行为时使用。
-        pass
+        # 失焦事件会在打开设置时一并触发；延迟后再次检查，避免误收起面板。
+        if (
+            bool(config_manager.get("PANEL_AUTO_COLLAPSE_ON_DEACTIVATE", True))
+            and self._expanded
+            and not self._transitioning
+            and not self._drag_started
+            and not self._has_settings_child()
+            and not self.isActiveWindow()
+        ):
+            self.collapse_panel()
 
     def _has_settings_child(self) -> bool:
         return bool(self._settings_window and self._settings_window.isVisible())
@@ -581,14 +589,14 @@ class FloatingWidget(QWidget):
         menu.addAction(quit_action)
         menu.exec(event.globalPos())
 
-    def open_settings(self) -> None:
-        if self._settings_window and self._settings_window.isVisible():
-            self._settings_window.raise_()
-            self._settings_window.activateWindow()
-            return
-        # Reuse the same dialog so repeated opens do not duplicate signal
-        # connections or leave hidden child windows behind.
+    def open_settings(
+        self,
+        provider_id: str | None = None,
+        start_cookie_acquisition: bool = False,
+    ) -> None:
         if self._settings_window is None:
+            # Reuse the same dialog so repeated opens do not duplicate signal
+            # connections or leave hidden child windows behind.
             self._settings_window = SettingsWindow(
                 self,
                 on_saved=self._on_config_saved,
@@ -597,9 +605,12 @@ class FloatingWidget(QWidget):
             # 设置窗口作为普通对话框，不应继承主窗口的置顶标志；
             # 否则会和悬浮球一起把其它应用压在下面。
             self._settings_window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
-        self._settings_window.show()
+        if not self._settings_window.isVisible():
+            self._settings_window.show()
         self._settings_window.raise_()
         self._settings_window.activateWindow()
+        if provider_id:
+            self._settings_window.open_provider(provider_id, start_cookie_acquisition)
 
     def _on_config_saved(self) -> None:
         config_manager.load_config()
@@ -619,23 +630,62 @@ class FloatingWidget(QWidget):
             self._request_id += 1
             request_id = self._request_id
         self._apply_update()
-        task = FetchTask(request_id)
+        task = FetchTask(request_id, lightweight=self._uses_lightweight_mimo_refresh())
         task.signals.finished.connect(self._finish_refresh)
         self._thread_pool.start(task)
 
     @Slot(int, object)
     def _finish_refresh(self, request_id: int, result: TokenData) -> None:
+        has_current_result = False
         with self._refresh_lock:
             if self._closed:
                 return
             if request_id == self._request_id:
                 self._data = result
+                has_current_result = True
             self._refreshing = False
             pending = self._pending_refresh
             self._pending_refresh = False
+        if has_current_result:
+            self._notify_auth_expired(result)
         self._apply_update()
         if pending:
             QTimer.singleShot(0, self.refresh)
+
+    def _notify_auth_expired(self, result: TokenData) -> None:
+        auth_error = next(
+            (error for error in result.errors if error.code == "AUTH_EXPIRED"), None
+        )
+        if auth_error is None:
+            # 只在鉴权错误解除后恢复通知资格，避免定时刷新重复弹窗。
+            self._auth_expired_notified = False
+            self._auth_expired_provider_id = None
+            return
+        if getattr(self, "_auth_expired_notified", False):
+            return
+        self._auth_expired_notified = True
+        provider_id = (
+            result.per_provider[0].provider_id
+            if result.per_provider
+            else str(config_manager.get("ACTIVE_PROVIDER", ""))
+        )
+        self._auth_expired_provider_id = provider_id
+        tray = getattr(self, "tray", None)
+        if tray is not None:
+            tray.showMessage(
+                "TokenSpider：登录凭据已失效",
+                f"{auth_error.message}\n点击此通知即可重新获取 Cookie。",
+                QSystemTrayIcon.MessageIcon.Warning,
+                10_000,
+            )
+
+    def handle_auth_expired_notification_click(self) -> None:
+        provider_id = getattr(self, "_auth_expired_provider_id", None)
+        if not provider_id:
+            return
+        # A tray click applies only to the notification that supplied this provider.
+        self._auth_expired_provider_id = None
+        self.open_settings(provider_id=provider_id, start_cookie_acquisition=True)
 
     def _apply_update(self) -> None:
         loading = self._refreshing and self._data.last_success_at is None
@@ -651,19 +701,16 @@ class FloatingWidget(QWidget):
         self.refresh()
         self._reschedule_refresh()
 
+    def _uses_lightweight_mimo_refresh(self) -> bool:
+        return (
+            not self._expanded
+            and str(config_manager.get("ACTIVE_PROVIDER", "")).strip().lower() == "mimo"
+        )
+
     def _reschedule_refresh(self) -> None:
         configured = int(config_manager.get("REFRESH_INTERVAL", 60_000))
-        # Panel visible = refresh at the configured interval (min 60s).
-        # Compact + snapped = almost never — the user can't see the data, so
-        # fetching it wastes CPU and network. 10 minutes is fine.
-        # Compact + normal (ball visible) = every 5 minutes.
-        if self._expanded:
-            interval = configured
-        elif self._edge_snapped:
-            interval = max(configured * 10, 600_000)
-        else:
-            interval = max(configured * 5, 300_000)
-        self._refresh_timer.start(interval)
+        # 面板与悬浮球应使用同一用户设置的刷新节奏，不能因窗口状态产生意外延迟。
+        self._refresh_timer.start(configured)
 
     def set_visible_from_tray(self) -> None:
         # 托盘点击时：如果处于贴边隐藏状态，先完整恢复显示

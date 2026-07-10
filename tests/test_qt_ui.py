@@ -483,20 +483,51 @@ def test_deactivation_collapses_panel_but_ignores_visible_settings():
         widget = FloatingWidget()
         widget.expand_panel()
 
-        with (
-            patch.object(widget, "isActiveWindow", return_value=False),
-            patch.object(widget, "_has_settings_child", return_value=True),
-        ):
-            widget._collapse_after_deactivation()
-        assert widget._expanded
+        with patch("ui.qt_widget.config_manager.get", return_value=True):
+            with (
+                patch.object(widget, "isActiveWindow", return_value=False),
+                patch.object(widget, "_has_settings_child", return_value=True),
+            ):
+                widget._collapse_after_deactivation()
+            assert widget._expanded
+
+            widget._drag_started = True
+            with patch.object(widget, "isActiveWindow", return_value=False):
+                widget._collapse_after_deactivation()
+            assert widget._expanded
+            widget._drag_started = False
+
+            with (
+                patch.object(widget, "isActiveWindow", return_value=True),
+                patch.object(widget, "_has_settings_child", return_value=False),
+            ):
+                widget._collapse_after_deactivation()
+            assert widget._expanded
+
+            with (
+                patch.object(widget, "isActiveWindow", return_value=False),
+                patch.object(widget, "_has_settings_child", return_value=False),
+            ):
+                widget._collapse_after_deactivation()
+        assert not widget._expanded
+        assert widget.ball.isVisible()
+        widget._closed = True
+        widget.hide()
+
+
+def test_deactivation_keeps_panel_expanded_when_auto_collapse_is_disabled():
+    with patch("ui.qt_widget.TokenData.fetch", return_value=sample_data()):
+        widget = FloatingWidget()
+        widget.expand_panel()
 
         with (
+            patch("ui.qt_widget.config_manager.get", return_value=False),
             patch.object(widget, "isActiveWindow", return_value=False),
             patch.object(widget, "_has_settings_child", return_value=False),
         ):
             widget._collapse_after_deactivation()
-        assert not widget._expanded
-        assert widget.ball.isVisible()
+
+        assert widget._expanded
         widget._closed = True
         widget.hide()
 
@@ -613,6 +644,60 @@ def test_settings_keep_unsaved_provider_drafts_when_switching():
         assert window._provider_widgets["AUTH"].text() == "draft-token"
         assert window._provider_widgets["AUTH"].echoMode() == QLineEdit.EchoMode.Password
         window.close()
+
+
+def test_settings_exposes_panel_auto_collapse_toggle():
+    values = {
+        **config_manager.all_config(),
+        "PANEL_AUTO_COLLAPSE_ON_DEACTIVATE": False,
+    }
+    with (
+        patch("ui.qt_settings.config_manager.load_config", return_value=values),
+        patch("ui.qt_settings.config_manager.all_config", return_value=values),
+    ):
+        window = SettingsWindow()
+
+    assert not window.panel_auto_collapse_check.isChecked()
+    window.panel_auto_collapse_check.setChecked(True)
+    assert window._values()["PANEL_AUTO_COLLAPSE_ON_DEACTIVATE"] is True
+    window.close()
+
+
+def test_settings_separates_accounts_runtime_and_updates_into_tabs():
+    with (
+        patch("ui.qt_settings.config_manager.load_config", return_value=config_manager.all_config()),
+        patch("ui.qt_settings.config_manager.all_config", return_value=config_manager.all_config()),
+    ):
+        window = SettingsWindow()
+
+    assert [window.tabs.tabText(index) for index in range(window.tabs.count())] == [
+        "账户与凭据",
+        "运行行为",
+        "软件更新",
+    ]
+    assert window.tabs.widget(0) is window.scroll_area
+    assert window.update_card.parent() is window.tabs.widget(2)
+    assert window.test_button.parent() is window.content
+    window.close()
+
+
+def test_deepseek_cookie_acquisition_only_updates_its_cookie_draft():
+    values = {
+        **config_manager.all_config(),
+        "ACTIVE_PROVIDER": "deepseek",
+        "DEEPSEEK_AUTH": "existing-bearer-token",
+    }
+    with (
+        patch("ui.qt_settings.config_manager.load_config", return_value=values),
+        patch("ui.qt_settings.config_manager.all_config", return_value=values),
+    ):
+        window = SettingsWindow()
+
+    window._apply_acquired_cookie("deepseek", "session=latest; user=42")
+    assert window._provider_widgets["COOKIE"].toPlainText() == "session=latest; user=42"
+    assert window._provider_widgets["AUTH"].text() == "existing-bearer-token"
+    assert window._provider_drafts["deepseek"]["COOKIE"] == "session=latest; user=42"
+    window.close()
 
 
 def test_settings_window_exposes_update_controls_without_controller():

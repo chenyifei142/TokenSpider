@@ -239,7 +239,7 @@ class DeepSeekProviderTests(unittest.TestCase):
         )
 
 
-    @patch("api.providers.mimo.MiMoProvider.find_chrome_executable")
+    @patch("api.browser_cookie.find_chrome_executable")
     def test_acquire_cookie_fails_gracefully_when_no_chrome(self, find_executable: Mock) -> None:
         find_executable.return_value = ""
         import threading

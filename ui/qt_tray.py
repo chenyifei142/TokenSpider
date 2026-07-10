@@ -29,6 +29,7 @@ class SystemTray(QSystemTrayIcon):
         menu.addAction(quit_action)
         self.setContextMenu(menu)
         self.activated.connect(self._activated)
+        self.messageClicked.connect(app.widget.handle_auth_expired_notification_click)
 
     def _activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:

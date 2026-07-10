@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+import threading
 from typing import Any
 
 import api.deepseek as platform_api
 import api.deepseek_official as official_api
 import config_manager
+from api import browser_cookie
 from api.deepseek import APIError
 from api.providers.base import FetchError, Provider, ProviderBalance, ProviderSummary, _decimal, safe_int
 
@@ -17,6 +19,7 @@ TOKEN_TYPES = {
     "PROMPT_CACHE_MISS_TOKEN",
     "RESPONSE_TOKEN",
 }
+_DEEPSEEK_ACQUIRE_URL = "https://platform.deepseek.com/usage"
 
 
 def _fetch_error(source: str, exc: Exception) -> FetchError:
@@ -102,6 +105,7 @@ class DeepSeekProvider(Provider):
     official_api_hosts = {"platform.deepseek.com", "api.deepseek.com"}
     supports_daily_usage = True
     supports_cost = True
+    supports_cookie_acquisition = True
     credential_fields = {
         "API_KEY": {
             "label": "API Key（可选）",
@@ -130,6 +134,41 @@ class DeepSeekProvider(Provider):
     def __init__(self) -> None:
         self._summary_cache: dict[str, Any] | None = None
         self._summary_error: Exception | None = None
+
+    @staticmethod
+    def acquired_cookie_values(cookie: str) -> dict[str, str]:
+        return {"COOKIE": browser_cookie.normalize_cookie(cookie)}
+
+    @staticmethod
+    def acquire_cookie_via_chrome(
+        stop_event: threading.Event,
+        use_edge: bool = False,
+        user_data_dir: str | None = None,
+    ) -> str:
+        return browser_cookie.acquire_cookie_via_chrome(
+            stop_event,
+            acquire_url=_DEEPSEEK_ACQUIRE_URL,
+            profile_name="deepseek-chrome",
+            allowed_domains=("platform.deepseek.com", "deepseek.com"),
+            cookie_names=None,
+            empty_cookie_error="DEEPSEEK_COOKIE_EMPTY",
+            use_edge=use_edge,
+            user_data_dir=user_data_dir,
+        )
+
+    @staticmethod
+    def describe_acquire_error(exc: Exception) -> str:
+        code = str(exc) if isinstance(exc, RuntimeError) else "ACQUIRE_UNEXPECTED"
+        messages = {
+            "CHROME_NOT_FOUND": "未检测到 Chrome 或 Edge，请先安装浏览器，或手动粘贴 Cookie",
+            "USER_DATA_DIR_FAILED": "无法创建浏览器用户数据目录",
+            "NO_FREE_CDP_PORT": "无法分配浏览器调试端口",
+            "CHROME_LAUNCH_FAILED": "浏览器启动失败，请检查权限或安全软件",
+            "BROWSER_NOT_READY": "浏览器调试接口未就绪，请稍后重试",
+            "DEEPSEEK_COOKIE_EMPTY": "当前浏览器会话尚未登录 DeepSeek，请登录后再采集",
+            "ACQUIRE_UNEXPECTED": "采集 DeepSeek Cookie 时出现未预期错误",
+        }
+        return messages.get(code, f"采集失败：{code}")
 
     def _has_platform_credentials(self) -> bool:
         return bool(

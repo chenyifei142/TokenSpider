@@ -38,6 +38,7 @@ class FakeProvider:
         self.payloads = payloads or []
         self.errors = errors or []
         self.configured = configured
+        self.requested_months = []
 
     def is_configured(self):
         return self.configured
@@ -48,7 +49,8 @@ class FakeProvider:
     def fetch_summary(self):
         return ProviderSummary(Decimal("1.2"), 100), None
 
-    def fetch_payloads(self, _months):
+    def fetch_payloads(self, months):
+        self.requested_months.append(list(months))
         return self.payloads, self.errors
 
 
@@ -66,9 +68,9 @@ class StoreTests(unittest.TestCase):
             item.start()
             self.addCleanup(item.stop)
 
-    def fetch_with(self, provider, today=date(2026, 7, 3)):
+    def fetch_with(self, provider, today=date(2026, 7, 3), lightweight=False):
         with patch("data.store.active_providers", return_value=iter([provider])):
-            return TokenData.fetch(today)
+            return TokenData.fetch(today, lightweight=lightweight)
 
     def test_month_ranges(self):
         self.assertEqual(months_for_week(date(2026, 7, 3)), [(6, 2026), (7, 2026)])
@@ -101,6 +103,21 @@ class StoreTests(unittest.TestCase):
         self.assertAlmostEqual(data.weekly_cost_cny, .53)
         self.assertEqual(data.total_cost_cny, 1.25)
         self.assertEqual(data.status, "ok")
+
+    def test_lightweight_mimo_fetch_only_requests_current_month(self):
+        provider = FakeProvider(payloads=[payload("2026-07-03", 30, ".23")])
+        provider.id = "mimo"
+        provider.name = "小米 MiMo"
+
+        with patch(
+            "data.store.history.unsynced_months", return_value=[(6, 2026)]
+        ) as unsynced_months:
+            data = self.fetch_with(provider, lightweight=True)
+
+        self.assertEqual(provider.requested_months, [[(7, 2026)]])
+        unsynced_months.assert_not_called()
+        self.assertEqual(data.today_tokens, 30)
+        self.assertAlmostEqual(data.today_cost_cny, .23)
 
     def test_partial_payload_failure_keeps_available_values(self):
         provider = FakeProvider(

@@ -83,6 +83,29 @@ QFrame#card:hover {{
     background: {C_GLASS_CARD_HOVER};
     border-color: {C_GLASS_BORDER_HOVER};
 }}
+QFrame#settingsCard {{
+    background: {C_GLASS_CARD};
+    border: 1px solid {C_GLASS_BORDER};
+    border-radius: 12px;
+}}
+QTabWidget::pane {{
+    border: 1px solid {C_GLASS_BORDER};
+    border-radius: 12px;
+    top: -1px;
+}}
+QTabBar::tab {{
+    min-height: 30px;
+    padding: 0 14px;
+    color: {C_SUBTEXT};
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: 2px solid transparent;
+}}
+QTabBar::tab:selected {{
+    color: {C_TEXT};
+    border-bottom-color: {C_ACCENT_2};
+}}
+QTabBar::tab:hover {{ color: {C_TEXT}; }}
 QLabel#panelTitle {{ color: {C_TEXT}; font-size: 20px; font-weight: 700; }}
 QLabel#cardTitle {{ color: {C_SUBTEXT}; font-size: 13px; font-weight: 600; }}
 QLabel#metricIcon {{
