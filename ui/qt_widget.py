@@ -35,12 +35,13 @@ from ui.geometry import (
 from ui.qt_ball import FloatingUsageBall
 from ui.qt_panel import MainPanel, format_money
 from ui.qt_settings import SettingsWindow
+from ui.qt_theme import theme_controller
 from ui.qt_update import AppUpdateController
 
 
 DEF_PANEL_W = 820
 DEF_PANEL_H = 550
-DEF_BALL_SIZE = 96
+DEF_BALL_SIZE = 88
 
 
 class FetchSignals(QObject):
@@ -144,6 +145,9 @@ class FloatingWidget(QWidget):
         self.panel.hide()
         self._layout.addWidget(self.ball, 0, Qt.AlignmentFlag.AlignTop)
         self._connect_ui()
+        controller = theme_controller()
+        controller.changed.connect(self._on_theme_state_changed)
+        self._sync_theme_controls(controller.mode, controller.resolved)
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._periodic_refresh)
@@ -165,11 +169,60 @@ class FloatingWidget(QWidget):
         self.panel.settings_requested.connect(self.open_settings)
         self.panel.refresh_requested.connect(self.refresh)
         self.panel.close_requested.connect(self.collapse_panel)
+        if hasattr(self.panel, "theme_requested"):
+            self.panel.theme_requested.connect(self._request_theme_change)
+
+    @Slot(str)
+    def _request_theme_change(self, mode: str) -> None:
+        controller = theme_controller()
+        previous_mode = controller.mode
+        saved = False
+        try:
+            # Theme is a global immediate preference, independent of the
+            # settings dialog's deferred credential/configuration save path.
+            config_manager.save_ui_theme(mode)
+            saved = True
+            controller.set_mode(mode)
+        except Exception as exc:
+            if saved:
+                try:
+                    config_manager.save_ui_theme(previous_mode)
+                except Exception:
+                    config_manager.logger().exception("Theme preference rollback failed")
+            if controller.mode != previous_mode:
+                try:
+                    controller.set_mode(previous_mode)
+                except Exception:
+                    config_manager.logger().exception("Theme controller rollback failed")
+            config_manager.logger().exception("Theme change failed: %s", exc)
+            self._sync_theme_controls(controller.mode, controller.resolved)
+            self._set_theme_feedback("主题切换失败，已恢复原设置。", "danger")
+            return
+        self._sync_theme_controls(controller.mode, controller.resolved)
+        if self._settings_window is not None and self._settings_window.isVisible():
+            self._settings_window.set_theme_feedback("主题已切换。", "success")
+
+    def _on_theme_state_changed(self, mode: str, resolved: str) -> None:
+        self._sync_theme_controls(mode, resolved)
+
+    def _sync_theme_controls(self, mode: str, resolved: str) -> None:
+        sync_panel = getattr(self.panel, "set_theme_mode", None)
+        if callable(sync_panel):
+            sync_panel(mode, resolved)
+        if self._settings_window is not None:
+            self._settings_window.set_theme_mode(mode)
+
+    def _set_theme_feedback(self, message: str, tone: str) -> None:
+        panel_feedback = getattr(self.panel, "set_theme_feedback", None)
+        if callable(panel_feedback):
+            panel_feedback(message, tone)
+        if self._settings_window is not None and self._settings_window.isVisible():
+            self._settings_window.set_theme_feedback(message, tone)
 
     @staticmethod
     def _compact_size() -> int:
         configured = int(config_manager.get("WIDGET_COMPACT_SIZE", DEF_BALL_SIZE))
-        return DEF_BALL_SIZE if configured < 96 else min(124, configured)
+        return DEF_BALL_SIZE if configured < DEF_BALL_SIZE else min(124, configured)
 
     @staticmethod
     def _expanded_size() -> tuple[int, int]:
@@ -602,6 +655,9 @@ class FloatingWidget(QWidget):
                 on_saved=self._on_config_saved,
                 update_controller=self._update_controller,
             )
+            self._settings_window.theme_requested.connect(self._request_theme_change)
+            controller = theme_controller()
+            self._settings_window.set_theme_mode(controller.mode)
             # 设置窗口作为普通对话框，不应继承主窗口的置顶标志；
             # 否则会和悬浮球一起把其它应用压在下面。
             self._settings_window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)

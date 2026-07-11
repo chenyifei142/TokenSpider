@@ -36,6 +36,20 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             config_manager.validate_config({"UPDATE_CHANNEL": "nightly"})
 
+    def test_ui_theme_values_are_validated_and_default_to_dark(self):
+        self.assertEqual(config_manager.validate_config({})["UI_THEME"], "dark")
+        for mode in ("system", "light", "dark"):
+            self.assertEqual(
+                config_manager.validate_config({"UI_THEME": mode})["UI_THEME"],
+                mode,
+            )
+        self.assertEqual(
+            config_manager.validate_config({"UI_THEME": " LIGHT "})["UI_THEME"],
+            "light",
+        )
+        with self.assertRaises(ValueError):
+            config_manager.validate_config({"UI_THEME": "sepia"})
+
     def test_legacy_default_compact_size_is_migrated(self):
         temp_root = Path.cwd() / ".test-appdata" / "tmp"
         temp_root.mkdir(parents=True, exist_ok=True)
@@ -47,7 +61,7 @@ class ConfigTests(unittest.TestCase):
             with patch.object(config_manager, "CONFIG_PATH", config_path):
                 values = config_manager._load_public_config()
 
-            self.assertEqual(values["WIDGET_COMPACT_SIZE"], 96)
+            self.assertEqual(values["WIDGET_COMPACT_SIZE"], 88)
 
             config_path.write_text(
                 json.dumps({"WIDGET_COMPACT_SIZE": 108}), encoding="utf-8"
@@ -55,7 +69,15 @@ class ConfigTests(unittest.TestCase):
             with patch.object(config_manager, "CONFIG_PATH", config_path):
                 previous_values = config_manager._load_public_config()
 
-            self.assertEqual(previous_values["WIDGET_COMPACT_SIZE"], 96)
+            self.assertEqual(previous_values["WIDGET_COMPACT_SIZE"], 88)
+
+            config_path.write_text(
+                json.dumps({"WIDGET_COMPACT_SIZE": 96}), encoding="utf-8"
+            )
+            with patch.object(config_manager, "CONFIG_PATH", config_path):
+                latest_default = config_manager._load_public_config()
+
+            self.assertEqual(latest_default["WIDGET_COMPACT_SIZE"], 88)
 
             config_path.write_text(
                 json.dumps({"WIDGET_COMPACT_SIZE": 112}), encoding="utf-8"
@@ -93,6 +115,64 @@ class ConfigTests(unittest.TestCase):
                 self.assertFalse(loaded["PANEL_AUTO_COLLAPSE_ON_DEACTIVATE"])
             finally:
                 config_manager._config = old_config
+
+    def test_save_ui_theme_only_replaces_public_preference(self):
+        temp_root = Path.cwd() / ".test-appdata" / "tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temp_root) as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            disk_values = config_manager._public_values(config_manager.DEFAULT_CONFIG)
+            disk_values["REFRESH_INTERVAL"] = 75_000
+            config_path.write_text(json.dumps(disk_values), encoding="utf-8")
+            old_config = config_manager._config
+            try:
+                draft = config_manager.DEFAULT_CONFIG.copy()
+                draft["REFRESH_INTERVAL"] = 5_000
+                draft["DEEPSEEK_API_KEY"] = "connection-test-draft"
+                with (
+                    patch.object(config_manager, "CONFIG_PATH", config_path),
+                    patch.object(config_manager, "_config", draft),
+                    patch.object(config_manager, "_write_credential") as write_credential,
+                ):
+                    self.assertEqual(config_manager.save_ui_theme("light"), "light")
+                    saved = json.loads(config_path.read_text(encoding="utf-8"))
+
+                    write_credential.assert_not_called()
+                    self.assertEqual(saved["UI_THEME"], "light")
+                    self.assertEqual(saved["REFRESH_INTERVAL"], 75_000)
+                    self.assertNotIn("DEEPSEEK_API_KEY", saved)
+                    self.assertEqual(
+                        config_manager._config["DEEPSEEK_API_KEY"],
+                        "connection-test-draft",
+                    )
+                    self.assertEqual(config_manager._config["UI_THEME"], "light")
+            finally:
+                config_manager._config = old_config
+
+    def test_save_ui_theme_failure_keeps_existing_public_config(self):
+        temp_root = Path.cwd() / ".test-appdata" / "tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temp_root) as directory:
+            config_path = Path(directory) / "config.json"
+            original = config_manager._public_values(config_manager.DEFAULT_CONFIG)
+            config_path.write_text(json.dumps(original), encoding="utf-8")
+            original_text = config_path.read_text(encoding="utf-8")
+
+            def fail_after_temp_write(path: Path, values: dict) -> None:
+                path.write_text(json.dumps(values), encoding="utf-8")
+                raise OSError("simulated replace preparation failure")
+
+            with (
+                patch.object(config_manager, "CONFIG_PATH", config_path),
+                patch.object(config_manager, "_write_json", side_effect=fail_after_temp_write),
+                patch.object(config_manager, "logger"),
+            ):
+                with self.assertRaises(OSError):
+                    config_manager.save_ui_theme("system")
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original_text)
+            self.assertFalse(config_path.with_name("config.json.theme.tmp").exists())
 
     def test_backups_exclude_secrets_and_are_limited(self):
         temp_root = Path.cwd() / ".test-appdata" / "tmp"

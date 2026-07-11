@@ -1,17 +1,16 @@
-"""Fluent-style monitoring panel built from PySide6 widgets."""
+"""Codex-inspired monitoring panel built from PySide6 widgets."""
 
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Callable
 
 import pyqtgraph as pg
-from PySide6.QtCore import QEasingCurve, QPoint, QRect, QSize, Qt, QPropertyAnimation, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QGradient, QLinearGradient, QPainter
+from PySide6.QtCore import QPoint, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFrame,
-    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QScrollArea,
@@ -26,29 +25,19 @@ import config_manager
 from data.store import TokenData
 from ui.activity import compact_tokens
 from ui.qt_heatmap import TokenActivityHeatmap
-from ui.qt_theme import (
-    ACTIVITY_CARD_HEIGHT,
-    CARD_PADDING,
-    C_ACCENT,
-    C_ACCENT_2,
-    C_BORDER,
-    C_GREEN,
-    C_PALE_BLUE,
-    C_RED,
-    C_SUBTEXT,
-    C_TEXT,
-    C_TIME,
-    C_YELLOW,
-    HEADER_HEIGHT,
-    LOWER_CARD_HEIGHT,
-    METRIC_CARD_HEIGHT,
-    PANEL_PADDING,
-    SECTION_SPACING,
-    STATUS_BAR_HEIGHT,
-    app_icon,
-    fluent_icon,
-    metric_icon,
-)
+from ui.qt_theme import app_icon, current_theme, fluent_icon, theme_controller
+
+
+PANEL_MIN_WIDTH = 640
+PANEL_MAX_WIDTH = 820
+PANEL_HEIGHT = 550
+HEADER_HEIGHT = 50
+TOP_SECTION_HEIGHT = 154
+ACTIVITY_SECTION_HEIGHT = 176
+STATISTICS_SECTION_HEIGHT = 92
+STATUS_SECTION_HEIGHT = 38
+SECTION_SPACING = 8
+SECTION_HORIZONTAL_MARGIN = 22
 
 
 def format_money(value: float | Decimal | None) -> str:
@@ -76,41 +65,9 @@ class MoneyAxis(pg.AxisItem):
         return [format_money_axis(value * scale) for value in values]
 
 
-def _smooth_curve(values: list[float], samples_per_segment: int = 12) -> tuple[list[float], list[float]]:
-    if len(values) < 2:
-        return [float(index) for index in range(len(values))], list(values)
-
-    deltas = [right - left for left, right in zip(values, values[1:])]
-    slopes = [deltas[0]]
-    for previous, following in zip(deltas, deltas[1:]):
-        # Zero the tangent at turning points and use a harmonic mean elsewhere,
-        # so smoothing cannot invent spikes between the real daily amounts.
-        if previous * following <= 0:
-            slopes.append(0.0)
-        else:
-            slopes.append(2 * previous * following / (previous + following))
-    slopes.append(deltas[-1])
-
-    smooth_x: list[float] = []
-    smooth_y: list[float] = []
-    for index, (left, right) in enumerate(zip(values, values[1:])):
-        for sample in range(samples_per_segment):
-            t = sample / samples_per_segment
-            t2 = t * t
-            t3 = t2 * t
-            smooth_x.append(index + t)
-            smooth_y.append(
-                (2 * t3 - 3 * t2 + 1) * left
-                + (t3 - 2 * t2 + t) * slopes[index]
-                + (-2 * t3 + 3 * t2) * right
-                + (t3 - t2) * slopes[index + 1]
-            )
-    smooth_x.append(float(len(values) - 1))
-    smooth_y.append(values[-1])
-    return smooth_x, smooth_y
-
-
 class DraggableHeader(QFrame):
+    """Header drag surface used to move the entire frameless window."""
+
     pressed = Signal(QPoint)
     dragged = Signal(QPoint)
     released = Signal(QPoint)
@@ -132,538 +89,141 @@ class DraggableHeader(QFrame):
 
 
 class StatusDot(QWidget):
+    """Small semantic status mark that follows live theme changes."""
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self._color = QColor(C_ACCENT)
+        self._role = "accent"
+        self._explicit_color: QColor | None = None
         self.setFixedSize(12, 12)
 
+    def set_role(self, role: str) -> None:
+        self._role = role
+        self._explicit_color = None
+        self.update()
+
     def set_color(self, color: str) -> None:
-        self._color = QColor(color)
+        """Keep the old color API available for callers outside MainPanel."""
+        self._explicit_color = QColor(color)
+        self.update()
+
+    def refresh_theme(self) -> None:
         self.update()
 
     def paintEvent(self, _event) -> None:
+        tokens = current_theme()
+        color = self._explicit_color or QColor(getattr(tokens, self._role, tokens.accent))
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(self._color)
+        painter.setBrush(color)
         painter.drawEllipse(2, 2, 8, 8)
         painter.end()
 
 
-PANEL_LAYOUT_DEFAULTS = {
-    "sections": ["top", "middle", "bottom"],
-    "top_cards": ["today", "balance", "month"],
-    "bottom_cards": ["trend", "statistics"],
-}
-
-
-def _normalize_order(values: list[str] | tuple[str, ...] | None, expected: list[str]) -> list[str]:
-    if not isinstance(values, (list, tuple)):
-        return list(expected)
-    order = [str(value) for value in values]
-    return order if sorted(order) == sorted(expected) and len(order) == len(expected) else list(expected)
-
-
-def _normalize_panel_layout_state(values: dict | None) -> dict[str, list[str]]:
-    raw = values if isinstance(values, dict) else {}
-    return {
-        key: _normalize_order(raw.get(key), expected)
-        for key, expected in PANEL_LAYOUT_DEFAULTS.items()
-    }
-
-
-class GripHandle(QWidget):
-    pressed = Signal(QPoint)
-    dragged = Signal(QPoint)
-    released = Signal(QPoint)
-
-    def __init__(self, parent: QWidget | None = None):
-        super().__init__(parent)
-        self.setFixedSize(24, 18)
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
-
-    def paintEvent(self, _event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(6, 20, 40, 176))
-        painter.drawRoundedRect(self.rect(), 8, 8)
-        painter.setBrush(QColor(C_PALE_BLUE))
-        for column in range(2):
-            for row in range(3):
-                painter.drawEllipse(7 + column * 6, 4 + row * 4, 2, 2)
-        painter.end()
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            self.pressed.emit(event.globalPosition().toPoint())
-            event.accept()
-
-    def mouseMoveEvent(self, event) -> None:
-        if event.buttons() & Qt.MouseButton.LeftButton:
-            self.dragged.emit(event.globalPosition().toPoint())
-            event.accept()
-
-    def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
-            self.released.emit(event.globalPosition().toPoint())
-            event.accept()
-
-
-class PanelSection(QWidget):
-    def __init__(self, content: QWidget, tooltip: str, parent: QWidget | None = None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(content)
-        self.drag_handle = GripHandle(self)
-        self.drag_handle.setToolTip(tooltip)
-        self.drag_handle.raise_()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self.drag_handle.raise_()
-        self.drag_handle.move(max(6, self.width() - self.drag_handle.width() - 10), 8)
-
-
-class ReorderArea(QWidget):
-    def __init__(self, parent: QWidget | None = None):
-        super().__init__(parent)
-        self._controller: ReorderController | None = None
-
-    def set_controller(self, controller: "ReorderController") -> None:
-        self._controller = controller
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        if self._controller is not None:
-            self._controller.relayout(animated=False)
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        if self._controller is not None:
-            self._controller.relayout(animated=False)
-
-
-class DragPlaceholder(QFrame):
-    def __init__(self, parent: QWidget | None = None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.hide()
-
-    def paintEvent(self, _event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setBrush(QColor(39, 103, 229, 18))
-        painter.setPen(QColor(102, 166, 255, 96))
-        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 14, 14)
-        painter.end()
-
-
-class ReorderController:
-    DRAG_THRESHOLD = 6
-    HYSTERESIS = 8
-    REORDER_DURATION_MS = 180
-    DROP_DURATION_MS = 190
-
-    def __init__(
-        self,
-        container: QWidget,
-        orientation: Qt.Orientation,
-        expected_order: list[str],
-        persist_order: Callable[[list[str]], None],
-        slot_stretches: list[int] | None = None,
-        item_stretches: dict[str, int] | None = None,
-        spacing: int = SECTION_SPACING,
-    ):
-        self._container = container
-        self._orientation = orientation
-        self._expected_order = list(expected_order)
-        self._persist_order = persist_order
-        self._slot_stretches = list(slot_stretches or [])
-        self._item_stretches = {str(key): int(value) for key, value in (item_stretches or {}).items()}
-        self._spacing = spacing
-        self._widgets: dict[str, QWidget] = {}
-        self._order = list(expected_order)
-        self._drag_item_id = ""
-        self._drag_origin = QPoint()
-        self._drag_started = False
-        self._drag_original_order = list(expected_order)
-        self._drag_press_offset = QPoint()
-        self._drag_restore_rect = QRect()
-        self._animations: dict[QWidget, QPropertyAnimation] = {}
-        self._placeholder = DragPlaceholder(container)
-        self._placeholder_animation: QPropertyAnimation | None = None
-        self._shadow_effects: dict[QWidget, QGraphicsDropShadowEffect] = {}
-        if isinstance(container, ReorderArea):
-            container.set_controller(self)
-
-    def register_item(self, item_id: str, widget: QWidget, handle: GripHandle) -> None:
-        widget.setParent(self._container)
-        widget.show()
-        self._widgets[item_id] = widget
-        handle.pressed.connect(lambda point, current=item_id: self.start_drag(current, point))
-        handle.dragged.connect(self.update_drag)
-        handle.released.connect(self.finish_drag)
-
-    def order(self) -> list[str]:
-        return list(self._order)
-
-    def set_order(self, order: list[str], persist: bool = False) -> None:
-        self._order = _normalize_order(order, self._expected_order)
-        self.relayout(animated=False)
-        if persist:
-            self._persist_order(self.order())
-
-    def start_drag(self, item_id: str, point: QPoint) -> None:
-        if item_id not in self._widgets:
-            return
-        self._stop_animation(self._widgets[item_id])
-        self._drag_item_id = item_id
-        self._drag_origin = QPoint(point)
-        self._drag_started = False
-        self._drag_original_order = self.order()
-        widget = self._widgets[item_id]
-        self._drag_restore_rect = QRect(widget.geometry())
-        self._drag_press_offset = point - widget.mapToGlobal(widget.rect().topLeft())
-
-    def update_drag(self, point: QPoint) -> None:
-        if not self._drag_item_id:
-            return
-        if not self._drag_started and (point - self._drag_origin).manhattanLength() < self.DRAG_THRESHOLD:
-            return
-        if not self._drag_started:
-            self._begin_drag()
-        self._move_dragged_widget(point)
-        self._update_reorder_target()
-
-    def finish_drag(self, point: QPoint) -> None:
-        if not self._drag_item_id:
-            return
-        inside = self._container.rect().contains(self._container.mapFromGlobal(point))
-        if not self._drag_started:
-            self._reset_drag_state()
-            return
-        if not inside:
-            self._order = list(self._drag_original_order)
-            self.relayout(animated=True)
-        final_rect = self._slot_rects(self._order)[self._drag_item_id]
-        should_persist = inside and self._order != self._drag_original_order
-        self._animate_widget_geometry(
-            self._widgets[self._drag_item_id],
-            final_rect,
-            self.DROP_DURATION_MS,
-            self._complete_drag(should_persist),
-        )
-        self._animate_placeholder(final_rect)
-        self._placeholder.show()
-
-    def relayout(self, animated: bool) -> None:
-        if not self._widgets:
-            return
-        slot_rects = self._slot_rects(self._order)
-        for item_id, widget in self._widgets.items():
-            if self._drag_started and item_id == self._drag_item_id:
-                continue
-            target = slot_rects[item_id]
-            if animated:
-                self._animate_widget_geometry(widget, target, self.REORDER_DURATION_MS)
-            else:
-                self._stop_animation(widget)
-                widget.setGeometry(target)
-        if self._drag_started and self._drag_item_id:
-            placeholder_rect = slot_rects[self._drag_item_id]
-            if self._placeholder.isHidden():
-                self._placeholder.setGeometry(placeholder_rect)
-            else:
-                self._animate_placeholder(placeholder_rect)
-
-    def _begin_drag(self) -> None:
-        self._drag_started = True
-        widget = self._widgets[self._drag_item_id]
-        widget.raise_()
-        effect = self._shadow_effects.get(widget)
-        if effect is None:
-            effect = QGraphicsDropShadowEffect(widget)
-            effect.setBlurRadius(24)
-            effect.setOffset(0, 8)
-            effect.setColor(QColor(10, 28, 54, 128))
-            self._shadow_effects[widget] = effect
-        widget.setGraphicsEffect(effect)
-        slot_rect = self._slot_rects(self._order)[self._drag_item_id]
-        self._placeholder.setGeometry(slot_rect)
-        self._placeholder.show()
-
-    def _move_dragged_widget(self, point: QPoint) -> None:
-        widget = self._widgets[self._drag_item_id]
-        top_left = self._container.mapFromGlobal(point - self._drag_press_offset)
-        widget.setGeometry(self._drag_geometry(top_left))
-
-    def _update_reorder_target(self) -> None:
-        moved = False
-        while True:
-            current_index = self._order.index(self._drag_item_id)
-            current_rects = self._slot_rects(self._order)
-            drag_center = self._widgets[self._drag_item_id].geometry().center()
-            drag_axis = drag_center.x() if self._orientation == Qt.Orientation.Horizontal else drag_center.y()
-
-            if current_index > 0:
-                previous_id = self._order[current_index - 1]
-                previous_center = current_rects[previous_id].center()
-                previous_axis = (
-                    previous_center.x()
-                    if self._orientation == Qt.Orientation.Horizontal
-                    else previous_center.y()
-                )
-                if drag_axis < previous_axis - self.HYSTERESIS:
-                    self._order[current_index - 1], self._order[current_index] = (
-                        self._order[current_index],
-                        self._order[current_index - 1],
-                    )
-                    moved = True
-                    continue
-            if current_index < len(self._order) - 1:
-                next_id = self._order[current_index + 1]
-                next_center = current_rects[next_id].center()
-                next_axis = (
-                    next_center.x()
-                    if self._orientation == Qt.Orientation.Horizontal
-                    else next_center.y()
-                )
-                if drag_axis > next_axis + self.HYSTERESIS:
-                    self._order[current_index], self._order[current_index + 1] = (
-                        self._order[current_index + 1],
-                        self._order[current_index],
-                    )
-                    moved = True
-                    continue
-            break
-        if moved:
-            self.relayout(animated=True)
-
-    def _slot_rects(self, order: list[str]) -> dict[str, QRect]:
-        count = len(order)
-        if count == 0:
-            return {}
-        if self._orientation == Qt.Orientation.Horizontal:
-            return self._horizontal_slot_rects(order)
-        return self._vertical_slot_rects(order)
-
-    def _horizontal_slot_rects(self, order: list[str]) -> dict[str, QRect]:
-        available_width = max(1, self._container.width() - self._spacing * (len(order) - 1))
-        height = self._container.height()
-        if self._item_stretches:
-            stretches = [max(1, self._item_stretches.get(item_id, 1)) for item_id in order]
-        else:
-            stretches = self._slot_stretches or [1] * len(order)
-        total = max(1, sum(stretches[: len(order)]))
-        unit = available_width // total
-        if unit > 0:
-            widths = [stretch * unit for stretch in stretches[: len(order)]]
-            x = (available_width - sum(widths)) // 2
-        else:
-            widths = []
-            used = 0
-            for index, stretch in enumerate(stretches[: len(order)]):
-                if index == len(order) - 1:
-                    width = available_width - used
-                else:
-                    width = round(available_width * stretch / total)
-                    width = min(width, available_width - used)
-                widths.append(width)
-                used += width
-            x = 0
-        rects: dict[str, QRect] = {}
-        for item_id, width in zip(order, widths):
-            rects[item_id] = QRect(x, 0, width, height)
-            x += width + self._spacing
-        return rects
-
-    def _vertical_slot_rects(self, order: list[str]) -> dict[str, QRect]:
-        rects: dict[str, QRect] = {}
-        y = 0
-        width = self._container.width()
-        for item_id in order:
-            widget = self._widgets[item_id]
-            height = widget.height() or widget.sizeHint().height()
-            rects[item_id] = QRect(0, y, width, height)
-            y += height + self._spacing
-        return rects
-
-    def _drag_geometry(self, top_left: QPoint) -> QRect:
-        base = QRect(self._drag_restore_rect)
-        return QRect(top_left.x(), top_left.y(), base.width(), base.height())
-
-    def _animate_placeholder(self, rect: QRect) -> None:
-        if self._placeholder_animation is not None:
-            self._placeholder_animation.stop()
-        self._placeholder_animation = QPropertyAnimation(self._placeholder, b"geometry")
-        self._placeholder_animation.setDuration(self.REORDER_DURATION_MS)
-        self._placeholder_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._placeholder_animation.setStartValue(self._placeholder.geometry())
-        self._placeholder_animation.setEndValue(rect)
-        self._placeholder_animation.start()
-
-    def _animate_widget_geometry(
-        self,
-        widget: QWidget,
-        rect: QRect,
-        duration: int,
-        finished_callback: Callable[[], None] | None = None,
-    ) -> None:
-        current = widget.geometry()
-        if current == rect:
-            if finished_callback is not None:
-                finished_callback()
-            return
-        self._stop_animation(widget)
-        animation = QPropertyAnimation(widget, b"geometry")
-        animation.setDuration(duration)
-        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        animation.setStartValue(current)
-        animation.setEndValue(rect)
-        if finished_callback is not None:
-            animation.finished.connect(finished_callback)
-        animation.start()
-        self._animations[widget] = animation
-
-    def _stop_animation(self, widget: QWidget) -> None:
-        animation = self._animations.pop(widget, None)
-        if animation is not None:
-            animation.stop()
-
-    def _complete_drag(self, persist: bool) -> Callable[[], None]:
-        def finish() -> None:
-            dragged = self._widgets.get(self._drag_item_id)
-            if dragged is not None:
-                dragged.setGraphicsEffect(None)
-            self._placeholder.hide()
-            self._reset_drag_state()
-            self.relayout(animated=False)
-            if persist:
-                self._persist_order(self.order())
-
-        return finish
-
-    def _reset_drag_state(self) -> None:
-        self._drag_item_id = ""
-        self._drag_started = False
-        self._drag_origin = QPoint()
-        self._drag_press_offset = QPoint()
-        self._drag_restore_rect = QRect()
-        self._drag_original_order = self.order()
-
-
 class MetricCard(QFrame):
+    """One logical metric in the flat top summary area."""
+
     def __init__(self, title: str, icon_name: str, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setObjectName("card")
-        self.drag_handle = GripHandle(self)
-        self.drag_handle.setToolTip("拖拽调整本层卡片顺序")
+        self.icon_name = icon_name
+        self.setObjectName("metricCard")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(CARD_PADDING, 7, CARD_PADDING, 7)
-        layout.setSpacing(2)
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(6)
-        icon = QLabel()
-        icon.setObjectName("metricIcon")
-        icon.setFixedSize(28, 28)
-        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon.setPixmap(metric_icon(icon_name))
-        title_label = QLabel(title)
-        title_label.setObjectName("cardTitle")
-        self.title_label = title_label
-        title_row.addWidget(icon)
-        title_row.addWidget(title_label)
-        title_row.addStretch(1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("metricLabel")
         self.value = QLabel("--")
         self.value.setObjectName("metricValue")
         self.detail = QLabel()
         self.detail.setObjectName("metricDetail")
         self.footer = QLabel()
         self.footer.setObjectName("muted")
-        layout.addLayout(title_row)
+        # The third visual direction intentionally keeps the summary sparse.
+        # Detail values remain populated for compatibility and accessibility.
+        self.detail.hide()
+        self.footer.hide()
+
+        layout.addWidget(self.title_label)
         layout.addWidget(self.value)
         layout.addWidget(self.detail)
-        layout.addStretch(1)
         layout.addWidget(self.footer)
-        self.footer.hide()
+        layout.addStretch(1)
+
+    def set_variant(self, variant: str) -> None:
+        self.value.setObjectName("heroValue" if variant == "hero" else "metricValue")
+        self.setProperty("variant", variant)
 
     def set_values(self, value: str, detail: str = "", footer: str = "") -> None:
         self.value.setText(value)
         self.detail.setText(detail)
         self.footer.setText(footer)
-        self.footer.setVisible(bool(footer))
+        self.detail.setToolTip(detail)
+        self.footer.setToolTip(footer)
 
     def set_title(self, title: str) -> None:
         self.title_label.setText(title)
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self.drag_handle.raise_()
-        self.drag_handle.move(max(6, self.width() - self.drag_handle.width() - 10), 10)
-
 
 class TrendCard(QFrame):
+    """Seven-day cost chart rendered as seven flat bars."""
+
+    BAR_WIDTH = 0.36
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setObjectName("card")
-        self.drag_handle = GripHandle(self)
-        self.drag_handle.setToolTip("拖拽调整本层卡片顺序")
+        self.setObjectName("trendSection")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(CARD_PADDING, 8, CARD_PADDING, 6)
+        layout.setContentsMargins(8, 5, 0, 2)
         layout.setSpacing(2)
+
         self.title = QLabel("近 7 天使用金额")
         self.title.setObjectName("sectionTitle")
         layout.addWidget(self.title)
+
         self.plot = pg.PlotWidget(
-            background=None,
             axisItems={"left": MoneyAxis(orientation="left")},
         )
-        self.plot.setStyleSheet("background: transparent; border: 0;")
-        self.plot.viewport().setStyleSheet("background: transparent;")
-        # The compact lower card gives the plot the remaining height while
-        # preserving its title, three grid intervals, and complete date axis.
-        self.plot.setMinimumHeight(78)
+        self.plot.setStyleSheet("border: 0;")
+        self.plot.setMinimumHeight(100)
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.hideButtons()
         self.plot.setMenuEnabled(False)
-        self.plot.showGrid(x=False, y=True, alpha=0.10)
+        self.plot.showGrid(x=False, y=True, alpha=0.14)
+
         axis_font = QFont("Microsoft YaHei UI", 8)
-        self.plot.getAxis("left").setTickFont(axis_font)
-        self.plot.getAxis("bottom").setTickFont(axis_font)
-        self.plot.getAxis("bottom").setStyle(hideOverlappingLabels=False)
-        self.plot.getAxis("left").setStyle(hideOverlappingLabels=False)
-        self.plot.getAxis("left").setTextPen(pg.mkPen(C_TIME))
-        self.plot.getAxis("bottom").setTextPen(pg.mkPen(C_TIME))
-        self.plot.getAxis("left").setPen(pg.mkPen(C_BORDER))
-        self.plot.getAxis("bottom").setPen(pg.mkPen(C_BORDER))
-        self.plot.getAxis("left").setWidth(52)
-        self.plot.getAxis("left").enableAutoSIPrefix(False)
-        self.plot.getAxis("bottom").setHeight(22)
-        # Leave half a day at both edges so the first and last points are not
-        # clamped to the plot border while all dates keep their integer x positions.
+        left_axis = self.plot.getAxis("left")
+        bottom_axis = self.plot.getAxis("bottom")
+        left_axis.setTickFont(axis_font)
+        bottom_axis.setTickFont(axis_font)
+        bottom_axis.setStyle(hideOverlappingLabels=False)
+        left_axis.setStyle(hideOverlappingLabels=False)
+        left_axis.setWidth(44)
+        left_axis.enableAutoSIPrefix(False)
+        bottom_axis.setHeight(22)
         self.plot.getViewBox().setLimits(xMin=-0.5, xMax=6.5, yMin=0)
+
         self._dates: list[date] = []
         self._values: list[float] = []
-        self._series: pg.PlotDataItem | None = None
-        self._hover_marker: pg.ScatterPlotItem | None = None
+        self._series: pg.BarGraphItem | None = None
+        self._hover_index: int | None = None
         self._mouse_proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved,
             rateLimit=60,
             slot=self._on_mouse_moved,
         )
         layout.addWidget(self.plot, 1)
+        self._connect_theme_changes()
+        self.set_rows([])
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self.drag_handle.raise_()
-        self.drag_handle.move(max(6, self.width() - self.drag_handle.width() - 10), 8)
+    def _connect_theme_changes(self) -> None:
+        try:
+            theme_controller().changed.connect(self._on_theme_changed)
+        except RuntimeError:
+            # Standalone component tests may construct the chart before an app-level
+            # controller exists; production configures the theme before any window.
+            pass
 
     def set_rows(self, rows: list[dict], today: date | None = None) -> None:
         current = today or date.today()
@@ -675,51 +235,69 @@ class TrendCard(QFrame):
         ]
         self.plot.clear()
 
-        area_gradient = QLinearGradient(0, 0, 0, 1)
-        area_gradient.setCoordinateMode(QGradient.CoordinateMode.ObjectMode)
-        area_gradient.setColorAt(0.0, QColor(39, 103, 229, 82))
-        area_gradient.setColorAt(0.55, QColor(39, 103, 229, 36))
-        area_gradient.setColorAt(1.0, QColor(39, 103, 229, 0))
-        curve_x, curve_y = _smooth_curve(self._values)
-        self._series = self.plot.plot(
-            curve_x,
-            curve_y,
-            pen=pg.mkPen(C_ACCENT, width=2),
-            antialias=True,
-            fillLevel=0,
-            brush=QBrush(area_gradient),
+        tokens = current_theme()
+        self._series = pg.BarGraphItem(
+            x=list(range(7)),
+            height=self._values,
+            width=self.BAR_WIDTH,
+            pen=pg.mkPen(tokens.accent),
+            brush=pg.mkBrush(tokens.accent),
         )
-        self.plot.plot(
-            list(range(7)),
-            self._values,
-            pen=None,
-            symbol="o",
-            symbolSize=6,
-            symbolBrush=pg.mkBrush(C_PALE_BLUE),
-            symbolPen=pg.mkPen(C_ACCENT, width=1),
-            antialias=True,
-        )
-        self._hover_marker = pg.ScatterPlotItem(
-            size=9,
-            brush=pg.mkBrush(C_ACCENT_2),
-            pen=pg.mkPen(C_PALE_BLUE, width=1.5),
-        )
-        self._hover_marker.hide()
-        self.plot.addItem(self._hover_marker)
+        self.plot.addItem(self._series)
+
         self.plot.getAxis("bottom").setTicks(
             [[(index, day.strftime("%m/%d")) for index, day in enumerate(self._dates)]]
         )
-        # Match the ViewBox limits so the intended edge spacing is not clamped away.
+        # Preserve half a day at each edge so all seven bars stay fully visible.
         self.plot.setXRange(-0.5, 6.5, padding=0)
-        maximum = max(self._values, default=0)
-        tick_max = max(0.01, maximum * 1.18)
-        self.plot.setYRange(0, tick_max * 1.18, padding=0)
+        maximum = max(self._values, default=0.0)
+        tick_max = max(0.01, maximum)
+        range_max = tick_max * 1.08 if maximum > 0 else tick_max
+        self.plot.setYRange(0, range_max, padding=0)
         self.plot.getAxis("left").setTicks(
             [[
                 (tick_max * index / 3, format_money_axis(tick_max * index / 3))
-                for index in range(1, 4)
+                for index in range(4)
             ]]
         )
+        self._hover_index = None
+        self.refresh_theme()
+
+    def refresh_theme(self) -> None:
+        tokens = current_theme()
+        # The selected layout is one continuous surface; the chart must not
+        # introduce a nested rectangular card behind the bars.
+        self.plot.setBackground(tokens.window)
+        left_axis = self.plot.getAxis("left")
+        bottom_axis = self.plot.getAxis("bottom")
+        left_axis.setTextPen(pg.mkPen(tokens.subtext))
+        bottom_axis.setTextPen(pg.mkPen(tokens.subtext))
+        axis_color = QColor(tokens.border)
+        axis_color.setAlpha(96)
+        left_axis.setPen(pg.mkPen(axis_color))
+        bottom_axis.setPen(pg.mkPen(axis_color))
+        if self._series is not None:
+            if self._hover_index is None:
+                self._series.setOpts(
+                    pens=None,
+                    brushes=None,
+                    pen=pg.mkPen(tokens.accent),
+                    brush=pg.mkBrush(tokens.accent),
+                )
+            else:
+                self._series.setOpts(
+                    pens=[
+                        pg.mkPen(tokens.accent_hover if index == self._hover_index else tokens.accent)
+                        for index in range(len(self._values))
+                    ],
+                    brushes=[
+                        pg.mkBrush(tokens.accent_hover if index == self._hover_index else tokens.accent)
+                        for index in range(len(self._values))
+                    ],
+                )
+
+    def _on_theme_changed(self, _mode: str, _resolved: str) -> None:
+        self.refresh_theme()
 
     def _on_mouse_moved(self, event) -> None:
         scene_pos = event[0]
@@ -728,12 +306,12 @@ class TrendCard(QFrame):
             return
         point = self.plot.getViewBox().mapSceneToView(scene_pos)
         index = int(round(point.x()))
-        if not 0 <= index < len(self._values) or abs(point.x() - index) > 0.45:
+        if not 0 <= index < len(self._values) or abs(point.x() - index) > self.BAR_WIDTH / 2:
             self._hide_hover()
             return
-        if self._hover_marker is not None:
-            self._hover_marker.setData([index], [self._values[index]])
-            self._hover_marker.show()
+
+        self._hover_index = index
+        self.refresh_theme()
         local = self.plot.mapFromScene(scene_pos)
         QToolTip.showText(
             self.plot.mapToGlobal(local),
@@ -742,8 +320,10 @@ class TrendCard(QFrame):
         )
 
     def _hide_hover(self) -> None:
-        if self._hover_marker is not None:
-            self._hover_marker.hide()
+        had_hover = self._hover_index is not None
+        self._hover_index = None
+        if had_hover:
+            self.refresh_theme()
         QToolTip.hideText()
 
     def tooltip_text(self, index: int) -> str:
@@ -754,55 +334,67 @@ class TrendCard(QFrame):
 
 
 class StatisticsCard(QFrame):
+    """Five equal columns matching the selected third-direction mockup."""
+
+    LABELS = (
+        "本月使用金额",
+        "历史使用总金额",
+        "本月 Token",
+        "近 7 天使用金额",
+        "近 7 天 Token",
+    )
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setObjectName("card")
-        self.drag_handle = GripHandle(self)
-        self.drag_handle.setToolTip("拖拽调整本层卡片顺序")
+        self.setObjectName("statisticsSection")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(CARD_PADDING, 8, CARD_PADDING, 6)
-        layout.setSpacing(0)
+        layout.setContentsMargins(SECTION_HORIZONTAL_MARGIN, 0, SECTION_HORIZONTAL_MARGIN, 2)
+        layout.setSpacing(3)
+
+        line = QFrame()
+        line.setObjectName("divider")
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFixedHeight(1)
+        layout.addWidget(line)
+
         title = QLabel("使用统计")
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
+
+        columns = QHBoxLayout()
+        columns.setContentsMargins(10, 0, 10, 0)
+        columns.setSpacing(0)
         self._values: list[QLabel] = []
-        labels = (
-            "本月使用金额",
-            "历史使用总金额",
-            "本月 Token",
-            "近 7 天使用金额",
-            "近 7 天 Token",
-        )
-        for label in labels:
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(8)
+        self._names: list[QLabel] = []
+        for index, label in enumerate(self.LABELS):
+            column = QWidget()
+            column_layout = QVBoxLayout(column)
+            column_layout.setContentsMargins(0, 0, 0, 0)
+            column_layout.setSpacing(1)
             name = QLabel(label)
-            name.setObjectName("muted")
+            name.setObjectName("statLabel")
+            name.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
             if label == "历史使用总金额":
-                # 平台不提供账户全生命周期总额，明确提示本地缓存口径，避免误解。
+                # The provider has no lifetime total; this value is the local cache scope.
                 name.setToolTip("按本机已缓存账单累计，未同步的早期账单不计入")
             value = QLabel("--")
-            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            value.setStyleSheet(f"color: {C_TEXT}; font-weight: 600;")
-            value.setMinimumWidth(70)
-            row_layout.addWidget(name)
-            row_layout.addStretch(1)
-            row_layout.addWidget(value)
-            layout.addWidget(row)
+            value.setObjectName("statValue")
+            value.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+            column_layout.addWidget(name)
+            column_layout.addWidget(value)
+            columns.addWidget(column, 1)
+            self._names.append(name)
             self._values.append(value)
-        layout.addStretch(1)
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self.drag_handle.raise_()
-        self.drag_handle.move(max(6, self.width() - self.drag_handle.width() - 10), 8)
+            if index < len(self.LABELS) - 1:
+                separator = QFrame()
+                separator.setObjectName("divider")
+                separator.setFrameShape(QFrame.Shape.VLine)
+                separator.setFixedSize(1, 46)
+                columns.addWidget(separator, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(columns, 1)
 
     def set_data(self, data: TokenData) -> None:
-        recent_rows = {
-            str(row.get("date")): row for row in data.daily_usage
-        }
+        recent_rows = {str(row.get("date")): row for row in data.daily_usage}
         recent_dates = [date.today() - timedelta(days=offset) for offset in range(6, -1, -1)]
         recent_cost = sum(
             float(recent_rows.get(day.isoformat(), {}).get("cost_cny", 0) or 0)
@@ -828,28 +420,67 @@ class MainPanel(QFrame):
     settings_requested = Signal()
     refresh_requested = Signal()
     close_requested = Signal()
+    theme_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("panelFrame")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setMinimumWidth(640)
+        self.setMinimumSize(PANEL_MIN_WIDTH, PANEL_HEIGHT)
+        self.setMaximumSize(PANEL_MAX_WIDTH, PANEL_HEIGHT)
+        self._theme_mode = "dark"
+        self._resolved_theme = current_theme().name
+        self._theme_feedback_message = ""
+        self._button_specs: list[tuple[QToolButton, str, QStyle.StandardPixmap, str]] = []
+
         root = QVBoxLayout(self)
         root.setContentsMargins(1, 1, 1, 1)
         root.setSpacing(0)
 
         self.header = DraggableHeader()
+        self.header.setObjectName("panelHeader")
         self.header.setFixedHeight(HEADER_HEIGHT)
         header_layout = QHBoxLayout(self.header)
-        header_layout.setContentsMargins(18, 9, 12, 8)
-        header_layout.setSpacing(9)
+        header_layout.setContentsMargins(14, 7, 12, 7)
+        header_layout.setSpacing(8)
+
         logo = QLabel()
-        logo.setPixmap(app_icon(32).pixmap(32, 32))
-        self._title_label = QLabel("API 使用监控")
+        logo.setPixmap(app_icon(28).pixmap(28, 28))
+        logo.setFixedSize(28, 28)
+        self._title_label = QLabel("TokenSpider")
         self._title_label.setObjectName("panelTitle")
+        provider_id = str(config_manager.get("ACTIVE_PROVIDER", "deepseek"))
+        provider_name = {"deepseek": "DeepSeek", "mimo": "小米 MiMo"}.get(
+            provider_id, provider_id
+        )
+        self._provider_label = QLabel(f" · {provider_name}" if provider_name else "")
+        self._provider_label.setObjectName("panelSubtitle")
         header_layout.addWidget(logo)
         header_layout.addWidget(self._title_label)
+        header_layout.addWidget(self._provider_label)
         header_layout.addStretch(1)
+
+        self.theme_segment = QFrame()
+        self.theme_segment.setObjectName("themeSegment")
+        self.theme_segment.setFixedHeight(30)
+        theme_layout = QHBoxLayout(self.theme_segment)
+        theme_layout.setContentsMargins(2, 2, 2, 2)
+        theme_layout.setSpacing(0)
+        self._theme_group = QButtonGroup(self)
+        self._theme_group.setExclusive(True)
+        self.light_theme_button = self._theme_button("sun", "light", "切换到浅色主题")
+        self.dark_theme_button = self._theme_button("moon", "dark", "切换到深色主题")
+        for button in (self.light_theme_button, self.dark_theme_button):
+            self._theme_group.addButton(button)
+            theme_layout.addWidget(button)
+        header_layout.addWidget(self.theme_segment)
+
+        header_divider = QFrame()
+        header_divider.setObjectName("divider")
+        header_divider.setFrameShape(QFrame.Shape.VLine)
+        header_divider.setFixedSize(1, 22)
+        header_layout.addWidget(header_divider)
+
         self.settings_button = self._tool_button(
             "settings", QStyle.StandardPixmap.SP_FileDialogDetailedView, "设置"
         )
@@ -862,42 +493,78 @@ class MainPanel(QFrame):
         self.settings_button.clicked.connect(self.settings_requested)
         self.refresh_button.clicked.connect(self.refresh_requested)
         self.close_button.clicked.connect(self.close_requested)
-        for button in (
-            self.settings_button,
-            self.refresh_button,
-            self.close_button,
-        ):
+        for button in (self.settings_button, self.refresh_button, self.close_button):
             header_layout.addWidget(button)
         root.addWidget(self.header)
 
         body = QWidget()
         body.setObjectName("panelRoot")
         content = QVBoxLayout(body)
-        content.setContentsMargins(PANEL_PADDING, 8, PANEL_PADDING, 8)
+        content.setContentsMargins(0, 7, 0, 7)
         content.setSpacing(SECTION_SPACING)
 
-        self._layout_state = _normalize_panel_layout_state(config_manager.load_panel_layout_state())
+        self.top_section = QFrame()
+        self.top_section.setObjectName("topSection")
+        self.top_section.setFixedHeight(TOP_SECTION_HEIGHT)
+        top_layout = QHBoxLayout(self.top_section)
+        top_layout.setContentsMargins(SECTION_HORIZONTAL_MARGIN, 5, SECTION_HORIZONTAL_MARGIN, 5)
+        top_layout.setSpacing(16)
 
-        self.metrics_container = ReorderArea()
-        self.metrics_container.setFixedHeight(METRIC_CARD_HEIGHT)
+        self.metrics_container = QWidget()
+        self.metrics_container.setObjectName("metricsContainer")
+        self.metrics_container.setMinimumWidth(205)
+        metrics_layout = QVBoxLayout(self.metrics_container)
+        metrics_layout.setContentsMargins(0, 0, 0, 0)
+        metrics_layout.setSpacing(3)
+
         self.today_card = MetricCard("今日使用金额", "usage")
+        self.today_card.set_variant("hero")
         self.balance_card = MetricCard("账户余额", "balance")
+        self.balance_card.set_variant("compact")
         self.month_card = MetricCard("本月累计", "month")
-        for card in (self.today_card, self.balance_card, self.month_card):
-            card.setFixedHeight(METRIC_CARD_HEIGHT)
-        self.top_section = PanelSection(self.metrics_container, "拖拽调整上中下层顺序")
-        self.top_section.setFixedHeight(METRIC_CARD_HEIGHT)
+        self.month_card.set_variant("compact")
+        metrics_layout.addWidget(self.today_card, 3)
+
+        compact_metrics = QHBoxLayout()
+        compact_metrics.setContentsMargins(0, 0, 0, 0)
+        compact_metrics.setSpacing(14)
+        compact_metrics.addWidget(self.balance_card, 1)
+        metric_divider = QFrame()
+        metric_divider.setObjectName("divider")
+        metric_divider.setFrameShape(QFrame.Shape.VLine)
+        metric_divider.setFixedWidth(1)
+        compact_metrics.addWidget(metric_divider)
+        compact_metrics.addWidget(self.month_card, 1)
+        metrics_layout.addLayout(compact_metrics, 2)
+        top_layout.addWidget(self.metrics_container, 5)
+
+        main_divider = QFrame()
+        main_divider.setObjectName("divider")
+        main_divider.setFrameShape(QFrame.Shape.VLine)
+        main_divider.setFixedWidth(1)
+        top_layout.addWidget(main_divider)
+
+        self.trend = TrendCard()
+        self.trend.setMinimumWidth(300)
+        top_layout.addWidget(self.trend, 11)
+        content.addWidget(self.top_section)
 
         self.activity_card = QFrame()
-        self.activity_card.setObjectName("card")
+        self.activity_card.setObjectName("activitySection")
+        self.activity_card.setFixedHeight(ACTIVITY_SECTION_HEIGHT)
         activity_layout = QVBoxLayout(self.activity_card)
-        activity_layout.setContentsMargins(CARD_PADDING, 10, CARD_PADDING, 6)
+        activity_layout.setContentsMargins(SECTION_HORIZONTAL_MARGIN, 0, SECTION_HORIZONTAL_MARGIN, 3)
         activity_layout.setSpacing(4)
-        self.activity_card.setFixedHeight(ACTIVITY_CARD_HEIGHT)
+
+        activity_divider = QFrame()
+        activity_divider.setObjectName("divider")
+        activity_divider.setFrameShape(QFrame.Shape.HLine)
+        activity_divider.setFixedHeight(1)
+        activity_layout.addWidget(activity_divider)
+
         activity_header = QHBoxLayout()
-        # 中层卡片的拖拽手柄覆盖在右上角；标题行预留同等安全区，
-        # 避免热力图摘要文字在窄宽度下与手柄重叠。
-        activity_header.setContentsMargins(0, 0, 36, 0)
+        activity_header.setContentsMargins(0, 0, 0, 0)
+        activity_header.setSpacing(8)
         activity_title = QLabel("Token 活动")
         activity_title.setObjectName("sectionTitle")
         self.activity_summary = QLabel("暂无 Token 活动")
@@ -906,74 +573,33 @@ class MainPanel(QFrame):
         activity_header.addStretch(1)
         activity_header.addWidget(self.activity_summary)
         activity_layout.addLayout(activity_header)
+
         self.activity_scroll = QScrollArea()
         self.activity_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.activity_scroll.setWidgetResizable(True)
         self.activity_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.activity_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.activity_scroll.viewport().setStyleSheet("background: transparent;")
+        # Do not style the viewport locally: Qt cascades such rules into the
+        # heatmap tooltip. The application palette supplies the themed surface.
         self.activity = TokenActivityHeatmap()
+        self._fit_activity_heatmap()
         self.activity_scroll.setWidget(self.activity)
         self.activity_scroll.setFixedHeight(self.activity.height())
         activity_layout.addWidget(self.activity_scroll)
-        self.middle_section = PanelSection(self.activity_card, "拖拽调整上中下层顺序")
-        self.middle_section.setFixedHeight(ACTIVITY_CARD_HEIGHT)
+        content.addWidget(self.activity_card)
+        self.middle_section = self.activity_card
 
-        self.lower_container = ReorderArea()
-        self.lower_container.setFixedHeight(LOWER_CARD_HEIGHT)
-        self.trend = TrendCard()
         self.statistics = StatisticsCard()
-        self.trend.setFixedHeight(LOWER_CARD_HEIGHT)
-        self.statistics.setFixedHeight(LOWER_CARD_HEIGHT)
-        self.bottom_section = PanelSection(self.lower_container, "拖拽调整上中下层顺序")
-        self.bottom_section.setFixedHeight(LOWER_CARD_HEIGHT)
-
-        self.sections_container = ReorderArea()
-        self.sections_container.setFixedHeight(
-            METRIC_CARD_HEIGHT + ACTIVITY_CARD_HEIGHT + LOWER_CARD_HEIGHT + SECTION_SPACING * 2
-        )
-        content.addWidget(self.sections_container)
-
-        self._section_reorder = ReorderController(
-            self.sections_container,
-            Qt.Orientation.Vertical,
-            PANEL_LAYOUT_DEFAULTS["sections"],
-            lambda order: self._persist_layout_order("sections", order),
-        )
-        self._section_reorder.register_item("top", self.top_section, self.top_section.drag_handle)
-        self._section_reorder.register_item("middle", self.middle_section, self.middle_section.drag_handle)
-        self._section_reorder.register_item("bottom", self.bottom_section, self.bottom_section.drag_handle)
-
-        self._top_card_reorder = ReorderController(
-            self.metrics_container,
-            Qt.Orientation.Horizontal,
-            PANEL_LAYOUT_DEFAULTS["top_cards"],
-            lambda order: self._persist_layout_order("top_cards", order),
-            slot_stretches=[1, 1, 1],
-        )
-        self._top_card_reorder.register_item("today", self.today_card, self.today_card.drag_handle)
-        self._top_card_reorder.register_item("balance", self.balance_card, self.balance_card.drag_handle)
-        self._top_card_reorder.register_item("month", self.month_card, self.month_card.drag_handle)
-
-        self._bottom_card_reorder = ReorderController(
-            self.lower_container,
-            Qt.Orientation.Horizontal,
-            PANEL_LAYOUT_DEFAULTS["bottom_cards"],
-            lambda order: self._persist_layout_order("bottom_cards", order),
-            item_stretches={"trend": 2, "statistics": 1},
-        )
-        self._bottom_card_reorder.register_item("trend", self.trend, self.trend.drag_handle)
-        self._bottom_card_reorder.register_item("statistics", self.statistics, self.statistics.drag_handle)
-
-        self._section_reorder.set_order(self._layout_state["sections"])
-        self._top_card_reorder.set_order(self._layout_state["top_cards"])
-        self._bottom_card_reorder.set_order(self._layout_state["bottom_cards"])
+        self.statistics.setFixedHeight(STATISTICS_SECTION_HEIGHT)
+        content.addWidget(self.statistics)
+        self.bottom_section = self.statistics
 
         footer_widget = QWidget()
         footer_widget.setObjectName("statusBar")
-        footer_widget.setFixedHeight(STATUS_BAR_HEIGHT)
+        footer_widget.setFixedHeight(STATUS_SECTION_HEIGHT)
         footer = QHBoxLayout(footer_widget)
-        footer.setContentsMargins(4, 5, 4, 0)
+        footer.setContentsMargins(SECTION_HORIZONTAL_MARGIN, 0, SECTION_HORIZONTAL_MARGIN, 0)
+        footer.setSpacing(8)
         self.status_dot = StatusDot()
         self.status_text = QLabel("等待连接")
         self.status_text.setObjectName("statusText")
@@ -986,6 +612,50 @@ class MainPanel(QFrame):
         content.addWidget(footer_widget)
         root.addWidget(body, 1)
 
+        configured_mode = str(config_manager.get("UI_THEME", "dark"))
+        self.set_theme_mode(configured_mode, current_theme().name)
+        try:
+            theme_controller().changed.connect(self._on_theme_changed)
+        except RuntimeError:
+            # Preserve standalone construction compatibility for callers that do
+            # not own application startup; the desktop app configures this first.
+            pass
+        self._refresh_icons()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "activity"):
+            self._fit_activity_heatmap()
+
+    def _fit_activity_heatmap(self) -> None:
+        # At the supported 640 px minimum, the full 53-week calendar must stay
+        # visible without a scrollbar stealing vertical room from the last row.
+        compact = self.width() < 775
+        self.activity.CELL = 9 if compact else 11
+        self.activity.MIN_HORIZONTAL_GAP = 1 if compact else 2
+        required_width = (
+            self.activity.LEFT
+            + self.activity.period.week_count
+            * (self.activity.CELL + self.activity.MIN_HORIZONTAL_GAP)
+            + 12
+        )
+        self.activity.setMinimumWidth(required_width)
+        self.activity.update()
+
+    def _theme_button(self, icon_name: str, mode: str, tooltip: str) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName("themeButton")
+        button.setProperty("themeValue", mode)
+        button.setCheckable(True)
+        button.setAutoRaise(True)
+        button.setFixedSize(24, 24)
+        button.setIconSize(QSize(14, 14))
+        button.setToolTip(tooltip)
+        button.setAccessibleName(tooltip)
+        button.clicked.connect(lambda _checked=False, value=mode: self._request_theme(value))
+        button._theme_icon_name = icon_name
+        return button
+
     def _tool_button(
         self,
         name: str,
@@ -994,8 +664,6 @@ class MainPanel(QFrame):
         role: str = "",
     ) -> QToolButton:
         button = QToolButton()
-        icon = fluent_icon(name, active_color=C_RED if role == "close" else C_ACCENT_2)
-        button.setIcon(icon if not icon.isNull() else self.style().standardIcon(standard))
         button.setIconSize(QSize(18, 18))
         button.setToolTip(tooltip)
         button.setAccessibleName(tooltip)
@@ -1004,18 +672,70 @@ class MainPanel(QFrame):
             button.setProperty("role", role)
         button.setFixedSize(32, 32)
         button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._button_specs.append((button, name, standard, role))
         return button
 
-    def _persist_layout_order(self, key: str, order: list[str]) -> None:
-        self._layout_state[key] = list(order)
-        config_manager.save_panel_layout_state(self.layout_state())
+    def _request_theme(self, mode: str) -> None:
+        self.set_theme_mode(mode, mode)
+        self.theme_requested.emit(mode)
 
-    def layout_state(self) -> dict[str, list[str]]:
-        return {
-            "sections": self._section_reorder.order(),
-            "top_cards": self._top_card_reorder.order(),
-            "bottom_cards": self._bottom_card_reorder.order(),
-        }
+    def set_theme_mode(self, mode: str, resolved: str | None = None) -> None:
+        """Synchronize the header selector with the configured and resolved mode."""
+        normalized_mode = mode if mode in {"system", "light", "dark"} else "dark"
+        normalized_resolved = resolved if resolved in {"light", "dark"} else current_theme().name
+        if normalized_resolved not in {"light", "dark"}:
+            normalized_resolved = "dark"
+        self._theme_mode = normalized_mode
+        self._resolved_theme = normalized_resolved
+        self._theme_feedback_message = ""
+
+        is_light = normalized_resolved == "light"
+        self.light_theme_button.setChecked(is_light)
+        self.dark_theme_button.setChecked(not is_light)
+        for button, selected in (
+            (self.light_theme_button, is_light),
+            (self.dark_theme_button, not is_light),
+        ):
+            button.setProperty("selected", selected)
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+        if normalized_mode == "system":
+            theme_name = "浅色" if is_light else "深色"
+            segment_tip = f"跟随系统（当前为{theme_name}主题）"
+            self.light_theme_button.setToolTip(f"{segment_tip}；点击固定为浅色主题")
+            self.dark_theme_button.setToolTip(f"{segment_tip}；点击固定为深色主题")
+        else:
+            segment_tip = "浅色主题" if is_light else "深色主题"
+            self.light_theme_button.setToolTip("浅色主题（当前）" if is_light else "切换到浅色主题")
+            self.dark_theme_button.setToolTip("深色主题（当前）" if not is_light else "切换到深色主题")
+        self.theme_segment.setToolTip(segment_tip)
+        self.theme_segment.setAccessibleDescription(segment_tip)
+
+    def set_theme_feedback(self, message: str, tone: str = "danger") -> None:
+        """Expose persistence feedback without replacing provider connection status."""
+        self._theme_feedback_message = message.strip()
+        self.theme_segment.setProperty("feedbackTone", tone)
+        if self._theme_feedback_message:
+            self.theme_segment.setToolTip(self._theme_feedback_message)
+            self.light_theme_button.setToolTip(self._theme_feedback_message)
+            self.dark_theme_button.setToolTip(self._theme_feedback_message)
+
+    def _on_theme_changed(self, mode: str, resolved: str) -> None:
+        self.set_theme_mode(mode, resolved)
+        self.status_dot.refresh_theme()
+        self._refresh_icons()
+        self.update()
+
+    def _refresh_icons(self) -> None:
+        tokens = current_theme()
+        for button, name, standard, role in self._button_specs:
+            active_color = tokens.danger if role == "close" else tokens.accent_hover
+            icon = fluent_icon(name, active_color=active_color)
+            button.setIcon(icon if not icon.isNull() else self.style().standardIcon(standard))
+        for button in (self.light_theme_button, self.dark_theme_button):
+            icon = fluent_icon(button._theme_icon_name, size=14, active_color=tokens.text)
+            button.setIcon(icon)
 
     def set_refreshing(self, refreshing: bool) -> None:
         self.refresh_button.setEnabled(not refreshing)
@@ -1024,20 +744,14 @@ class MainPanel(QFrame):
     def update_data(self, data: TokenData, loading: bool = False) -> None:
         money = lambda value: "--" if loading else format_money(value)
         tokens = lambda value: "--" if loading or value is None else compact_tokens(int(value))
-        # Show the active provider name in the title bar.
-        provider_id = ""
         if data.per_provider:
-            provider_id = data.per_provider[0].provider_id
             provider_name = data.per_provider[0].provider_name
-            self._title_label.setText(f"API 使用监控 · {provider_name}")
+            self._provider_label.setText(f" · {provider_name}")
+
         self.today_card.set_title("今日使用金额")
         self.balance_card.set_title("账户余额")
         self.month_card.set_title("本月累计")
-        self.today_card.set_values(
-            money(data.today_cost_cny),
-            tokens(data.today_tokens),
-            "",
-        )
+        self.today_card.set_values(money(data.today_cost_cny), tokens(data.today_tokens), "")
         self.balance_card.set_values(
             money(data.balance_cny),
             f"约 {tokens(data.balance_tokens)}" if data.balance_tokens else "账户可用余额",
@@ -1048,6 +762,7 @@ class MainPanel(QFrame):
             tokens(data.monthly_usage_tokens),
             "",
         )
+
         self.activity.set_activity(data.daily_usage)
         source_days = [day for day in self.activity.days if day.has_source_data]
         total = sum(day.token_count for day in source_days)
@@ -1060,37 +775,56 @@ class MainPanel(QFrame):
             else:
                 summary = f"过去 12 个月共使用 {compact_tokens(total)}"
         self.activity_summary.setText(summary)
+
         self.trend.set_rows(data.daily_usage)
         self.statistics.set_data(data)
-        status, color = self.status_summary(data, loading)
+        status, _color = self.status_summary(data, loading)
         self.status_text.setText(status)
-        self.status_dot.set_color(color)
+        self.status_dot.set_role(self.status_role(data, loading))
         self.updated_text.setText(self.relative_update_time(data))
 
     @staticmethod
-    def status_summary(data: TokenData, loading: bool = False) -> tuple[str, str]:
+    def status_role(data: TokenData, loading: bool = False) -> str:
         if loading:
-            return "正在更新", C_ACCENT
+            return "accent"
+        codes = {error.code for error in data.errors}
+        if "NOT_CONFIGURED" in codes or data.status == "not_configured":
+            return "warning"
+        if codes & {"AUTH_EXPIRED", "NETWORK_TIMEOUT", "NETWORK_ERROR", "SERVER_ERROR"}:
+            return "danger"
+        if data.status == "partial":
+            return "warning"
+        if data.status == "error":
+            return "danger"
+        if data.status == "ok":
+            return "success"
+        return "accent"
+
+    @staticmethod
+    def status_summary(data: TokenData, loading: bool = False) -> tuple[str, str]:
+        theme = current_theme()
+        if loading:
+            return "正在更新", theme.accent
         codes = {error.code for error in data.errors}
         if "NOT_CONFIGURED" in codes:
-            return "尚未配置 Token/Cookie，请前往设置", C_YELLOW
+            return "尚未配置 Token/Cookie，请前往设置", theme.warning
         if "AUTH_EXPIRED" in codes:
-            return "认证信息已失效，请重新配置", C_RED
+            return "认证信息已失效，请重新配置", theme.danger
         if codes & {"NETWORK_TIMEOUT", "NETWORK_ERROR"}:
-            return "网络连接失败", C_RED
+            return "网络连接失败", theme.danger
         if "SERVER_ERROR" in codes:
-            return "API 服务异常", C_RED
+            return "API 服务异常", theme.danger
         if data.status == "not_configured":
-            return "尚未配置凭据，请前往设置", C_YELLOW
+            return "尚未配置凭据，请前往设置", theme.warning
         if data.status == "ok" and data.today_tokens is None:
-            return "连接正常，平台未提供按日明细", C_GREEN
+            return "连接正常，平台未提供按日明细", theme.success
         if data.status == "ok" and not any(day.get("tokens", 0) for day in data.daily_usage):
-            return "连接正常，暂无 Token 活动", C_GREEN
+            return "连接正常，暂无 Token 活动", theme.success
         return {
-            "ok": ("连接正常", C_GREEN),
-            "partial": ("部分数据异常，显示可用数据", C_YELLOW),
-            "error": ("连接异常", C_RED),
-        }.get(data.status, ("等待连接", C_ACCENT))
+            "ok": ("连接正常", theme.success),
+            "partial": ("部分数据异常，显示可用数据", theme.warning),
+            "error": ("连接异常", theme.danger),
+        }.get(data.status, ("等待连接", theme.accent))
 
     @staticmethod
     def relative_update_time(data: TokenData) -> str:

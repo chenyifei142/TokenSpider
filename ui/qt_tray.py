@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QMenu, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from app_identity import APP_DISPLAY_NAME
-from ui.qt_theme import app_icon
+from ui.qt_theme import app_icon, theme_controller
 
 
 class SystemTray(QSystemTrayIcon):
@@ -27,9 +27,19 @@ class SystemTray(QSystemTrayIcon):
         menu.addActions((visible, refresh, settings))
         menu.addSeparator()
         menu.addAction(quit_action)
+        self._menu = menu
         self.setContextMenu(menu)
+        theme_controller().changed.connect(self._refresh_menu_theme)
         self.activated.connect(self._activated)
         self.messageClicked.connect(app.widget.handle_auth_expired_notification_click)
+
+    def _refresh_menu_theme(self, _mode: str, _resolved: str) -> None:
+        application = QApplication.instance()
+        if application is not None:
+            self._menu.setPalette(application.palette())
+        self._menu.style().unpolish(self._menu)
+        self._menu.style().polish(self._menu)
+        self._menu.update()
 
     def _activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:

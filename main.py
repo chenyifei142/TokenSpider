@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from app_identity import APP_DISPLAY_NAME, APP_VERSION, SINGLE_INSTANCE_MUTEX
 from app_update import cleanup_pending_update
-from ui.qt_theme import APP_STYLE, app_icon
+from ui.qt_theme import app_icon, configure_theme
 from ui.qt_tray import SystemTray
 from ui.qt_widget import FloatingWidget
 
@@ -60,8 +60,8 @@ class App:
         self.qt_app = QApplication.instance() or QApplication(sys.argv)
         self.qt_app.setQuitOnLastWindowClosed(False)
         self.qt_app.setApplicationName(APP_DISPLAY_NAME)
+        configure_theme(self.qt_app, config_manager.get("UI_THEME", "dark"))
         self.qt_app.setWindowIcon(app_icon(64))
-        self.qt_app.setStyleSheet(APP_STYLE)
         self.widget = FloatingWidget(tray_icon=None)
         self.tray = SystemTray(self)
         self.widget.tray = self.tray

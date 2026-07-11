@@ -39,7 +39,6 @@ from app_update import (
     status_summary,
 )
 from app_identity import MAIN_EXECUTABLE_NAME
-from ui.qt_theme import C_SUBTEXT
 
 
 class UpdateCheckWorker(QThread):
@@ -173,7 +172,7 @@ class DownloadProgressDialog(QDialog):
         root.addWidget(self.progress_bar)
 
         self.detail_label = QLabel("0 / 0")
-        self.detail_label.setStyleSheet(f"color: {C_SUBTEXT};")
+        self.detail_label.setProperty("tone", "muted")
         root.addWidget(self.detail_label)
 
         actions = QHBoxLayout()

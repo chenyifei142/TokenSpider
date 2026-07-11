@@ -6,34 +6,47 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["APPDATA"] = str(Path.cwd() / ".test-appdata")
 
+import pyqtgraph as pg
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit, QScrollArea, QToolButton, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QLabel,
+    QLineEdit,
+    QScrollArea,
+    QToolButton,
+    QWidget,
+)
 
 from app_update import CheckResult, ReleaseAsset, ReleaseInfo, SemVer
 import config_manager
 from data.store import TokenData
 from ui.geometry import WorkArea
-from ui.qt_panel import MainPanel, StatisticsCard, TrendCard, format_money_axis, format_token_axis
-from ui.qt_settings import SettingsWindow
-from ui.qt_theme import (
-    ACTIVITY_CARD_HEIGHT,
-    APP_STYLE,
-    C_ACCENT,
-    C_GLASS_BORDER,
-    C_GLASS_CARD,
-    C_HEAT,
-    C_PANEL,
-    C_TEXT,
-    LOWER_CARD_HEIGHT,
-    METRIC_CARD_HEIGHT,
+from ui.qt_ball import FloatingUsageBall
+from ui.qt_panel import (
+    ACTIVITY_SECTION_HEIGHT,
+    HEADER_HEIGHT,
+    PANEL_HEIGHT,
+    PANEL_MAX_WIDTH,
+    PANEL_MIN_WIDTH,
+    STATISTICS_SECTION_HEIGHT,
+    STATUS_SECTION_HEIGHT,
+    TOP_SECTION_HEIGHT,
+    MainPanel,
+    StatisticsCard,
+    TrendCard,
+    format_money_axis,
+    format_token_axis,
 )
-from ui.qt_update import AppUpdateController
+from ui.qt_settings import SettingsWindow
+from ui.qt_theme import configure_theme, current_theme
+from ui.qt_update import AppUpdateController, UpdatePromptDialog
 from ui.qt_widget import FloatingWidget
 
 
 APP = QApplication.instance() or QApplication([])
-APP.setStyleSheet(APP_STYLE)
+configure_theme(APP, "dark")
 
 
 def sample_data() -> TokenData:
@@ -79,10 +92,6 @@ def sample_release(version: str = "1.3.4") -> ReleaseInfo:
     )
 
 
-def center_global(widget) -> QPoint:
-    return widget.mapToGlobal(widget.rect().center())
-
-
 def test_token_axis_uses_readable_units():
     assert format_token_axis(0) == "0万"
     assert format_token_axis(1_500) == "0.15万"
@@ -107,36 +116,38 @@ def test_panel_token_values_use_readable_units():
     panel.close()
 
 
-def test_trend_uses_daily_cost_and_money_tooltip():
+def test_trend_uses_exactly_seven_cost_bars_with_hover_tooltip():
     trend = TrendCard()
     trend.set_rows(sample_data().daily_usage, date.today())
-    trend.resize(480, LOWER_CARD_HEIGHT)
+    trend.resize(480, TOP_SECTION_HEIGHT)
     trend.show()
     APP.processEvents()
-    scene_point = trend.plot.getViewBox().mapViewToScene(QPointF(0, 0.6))
-    trend._on_mouse_moved((scene_point,))
 
     assert trend.title.text() == "近 7 天使用金额"
     assert trend._values == [0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0]
-    assert len(trend._series.xData) > len(trend._values)
+    bar_items = [
+        item
+        for item in trend.plot.getPlotItem().items
+        if isinstance(item, pg.BarGraphItem)
+    ]
+    assert bar_items == [trend._series]
+    assert trend._series.opts["x"] == list(range(7))
+    assert trend._series.opts["height"] == trend._values
+    assert trend._series.opts["width"] == trend.BAR_WIDTH
     x_min, x_max = trend.plot.getViewBox().viewRange()[0]
     assert x_min == -0.5
     assert x_max == 6.5
-    for index, value in enumerate(trend._values):
-        point = next(
-            position
-            for position, x_value in enumerate(trend._series.xData)
-            if x_value == index
-        )
-        assert trend._series.yData[point] == value
     assert (date.today() - timedelta(days=6)).isoformat() in trend.tooltip_text(0)
     assert "使用金额：¥0.60" in trend.tooltip_text(0)
-    assert trend._hover_marker.isVisible()
-    scene_point = trend.plot.getViewBox().mapViewToScene(QPointF(6, 0))
-    trend._on_mouse_moved((scene_point,))
-    marker_x, marker_y = trend._hover_marker.getData()
-    assert marker_x.tolist() == [6]
-    assert marker_y.tolist() == [0.0]
+
+    scene_point = trend.plot.getViewBox().mapViewToScene(QPointF(0, 0.3))
+    with patch("ui.qt_panel.QToolTip.showText") as show_tooltip:
+        trend._on_mouse_moved((scene_point,))
+
+    assert trend._hover_index == 0
+    assert len(trend._series.opts["brushes"]) == 7
+    assert show_tooltip.call_count == 1
+    assert show_tooltip.call_args.args[1] == trend.tooltip_text(0)
     trend.close()
 
 
@@ -164,249 +175,168 @@ def test_statistics_show_cached_historical_total_with_scope_tooltip():
     statistics.close()
 
 
-def test_panel_charts_keep_dark_background_and_compact_heatmap_height():
+def test_panel_uses_fixed_v3_layout_budget_and_fluent_actions():
     panel = MainPanel()
     panel.resize(820, 550)
     panel.update_data(sample_data())
     panel.show()
     APP.processEvents()
     panel.activity.grab()
-    plot_image = panel.trend.plot.grab().toImage()
-    center = plot_image.pixelColor(plot_image.width() // 2, plot_image.height() // 2)
+    status_bar = panel.findChild(QWidget, "statusBar")
+    buttons = panel.findChildren(QToolButton, "panelToolButton")
 
+    assert PANEL_MIN_WIDTH == 640
+    assert PANEL_MAX_WIDTH == 820
+    assert PANEL_HEIGHT == 550
+    assert HEADER_HEIGHT == 50
+    assert TOP_SECTION_HEIGHT == 154
+    assert ACTIVITY_SECTION_HEIGHT == 176
+    assert STATISTICS_SECTION_HEIGHT == 92
+    assert STATUS_SECTION_HEIGHT == 38
+    assert panel.minimumSize().width() == PANEL_MIN_WIDTH
+    assert panel.maximumSize().width() == PANEL_MAX_WIDTH
+    assert panel.minimumSize().height() == PANEL_HEIGHT
+    assert panel.maximumSize().height() == PANEL_HEIGHT
+    assert panel.header.height() == HEADER_HEIGHT
+    assert panel.top_section.height() == TOP_SECTION_HEIGHT
+    assert panel.activity_card.height() == ACTIVITY_SECTION_HEIGHT
+    assert panel.statistics.height() == STATISTICS_SECTION_HEIGHT
+    assert status_bar.height() == STATUS_SECTION_HEIGHT
+    assert panel.top_section.y() < panel.activity_card.y() < panel.statistics.y() < status_bar.y()
     assert len(panel.activity._hits) >= 365
-    assert METRIC_CARD_HEIGHT == 100
-    assert ACTIVITY_CARD_HEIGHT == 176
-    assert LOWER_CARD_HEIGHT == 128
-    assert all(
-        card.height() == METRIC_CARD_HEIGHT
-        for card in (panel.today_card, panel.balance_card, panel.month_card)
-    )
-    assert panel.activity_card.height() == ACTIVITY_CARD_HEIGHT
     assert panel.activity.height() == 133
-    assert panel.trend.height() == LOWER_CARD_HEIGHT
-    assert panel.statistics.height() == LOWER_CARD_HEIGHT
     assert len(panel.statistics._values) == 5
+    assert all(
+        label.alignment() & Qt.AlignmentFlag.AlignHCenter
+        for label in panel.statistics._names + panel.statistics._values
+    )
     assert all(
         0 <= value.mapTo(panel.statistics, QPoint()).y()
         and value.mapTo(panel.statistics, QPoint()).y() + value.height()
         <= panel.statistics.height()
         for value in panel.statistics._values
     )
-    assert not panel.activity_scroll.horizontalScrollBar().isVisible()
-    assert max(center.red(), center.green(), center.blue()) < 245
-    panel.close()
-
-
-def test_activity_summary_keeps_clear_of_section_drag_handle():
-    panel = MainPanel()
-    panel.resize(820, 550)
-    panel.update_data(sample_data())
-    panel.show()
-    APP.processEvents()
-
-    summary_top_right = panel.activity_summary.mapTo(
-        panel.middle_section,
-        panel.activity_summary.rect().topRight(),
-    )
-    handle_left = panel.middle_section.drag_handle.x()
-
-    assert summary_top_right.x() < handle_left
-    panel.close()
-
-
-def test_panel_uses_shared_glass_theme_and_fluent_action_buttons():
-    panel = MainPanel()
-    buttons = panel.findChildren(QToolButton, "panelToolButton")
-
-    assert C_PANEL == "#051228"
-    assert C_GLASS_CARD == "rgba(38, 89, 158, 26)"
-    assert C_GLASS_BORDER == "rgba(102, 166, 255, 41)"
-    assert C_ACCENT == "#2767E5"
-    assert C_TEXT == "#E5E9F0"
-    assert C_HEAT == (
-        "#0B2440",
-        "#0B4087",
-        "#0958B8",
-        "#116CD2",
-        "#2497FA",
-        "#9ED0FD",
-    )
     assert [button.toolTip() for button in buttons] == ["设置", "刷新", "收起"]
     assert all(not button.icon().isNull() for button in buttons)
     assert all(button.iconSize().width() == 18 for button in buttons)
+    assert panel.light_theme_button.size().width() == 24
+    assert panel.dark_theme_button.size().width() == 24
+    assert panel.light_theme_button.iconSize().width() == 14
+    assert panel.theme_segment.height() == 30
     panel.close()
 
 
-def test_panel_restores_saved_layout_state():
+def test_panel_at_640px_keeps_full_heatmap_without_horizontal_scrolling():
+    panel = MainPanel()
+    panel.resize(PANEL_MIN_WIDTH, PANEL_HEIGHT)
+    panel.update_data(sample_data())
+    panel.show()
+    APP.processEvents()
+    panel.activity.grab()
+    APP.processEvents()
+
+    assert panel.size().width() == PANEL_MIN_WIDTH
+    assert panel.activity.width() <= panel.activity_scroll.viewport().width()
+    assert not panel.activity_scroll.horizontalScrollBar().isVisible()
+    assert all(
+        not scroll.horizontalScrollBar().isVisible()
+        for scroll in panel.findChildren(QScrollArea)
+    )
+    panel.close()
+
+
+def test_panel_ignores_legacy_layout_state_and_has_no_reorder_handles():
     saved_layout = {
         "sections": ["bottom", "top", "middle"],
         "top_cards": ["month", "today", "balance"],
         "bottom_cards": ["statistics", "trend"],
     }
-    with patch("ui.qt_panel.config_manager.load_panel_layout_state", return_value=saved_layout):
+    with (
+        patch(
+            "ui.qt_panel.config_manager.load_panel_layout_state",
+            return_value=saved_layout,
+        ) as load_layout,
+        patch("ui.qt_panel.config_manager.save_panel_layout_state") as save_layout,
+    ):
         panel = MainPanel()
 
-    assert panel.layout_state() == saved_layout
+    load_layout.assert_not_called()
+    save_layout.assert_not_called()
+    assert not hasattr(panel, "layout_state")
+    assert not hasattr(panel, "_section_reorder")
+    assert not hasattr(panel, "_top_card_reorder")
+    assert not hasattr(panel, "_bottom_card_reorder")
+    assert not panel.findChildren(QWidget, "dragHandle")
+    assert all(
+        not hasattr(widget, "drag_handle")
+        for widget in (
+            panel.top_section,
+            panel.activity_card,
+            panel.statistics,
+            panel.today_card,
+            panel.balance_card,
+            panel.month_card,
+            panel.trend,
+        )
+    )
     panel.close()
 
 
-def test_invalid_drag_restores_original_order_without_persist():
-    with (
-        patch("ui.qt_panel.config_manager.load_panel_layout_state", return_value={}),
-        patch("ui.qt_panel.config_manager.save_panel_layout_state") as save_layout,
-    ):
-        panel = MainPanel()
-        panel.resize(820, 550)
-        panel.show()
-        APP.processEvents()
+def test_panel_system_mode_selects_resolved_theme_and_explains_following():
+    panel = MainPanel()
 
-        controller = panel._top_card_reorder
-        controller.REORDER_DURATION_MS = 0
-        controller.DROP_DURATION_MS = 0
-        start = center_global(panel.today_card.drag_handle)
-        reorder_target = panel.metrics_container.mapToGlobal(
-            QPoint(panel.metrics_container.width() - 4, panel.metrics_container.height() // 2)
-        )
-        invalid_target = panel.mapToGlobal(QPoint(-24, -24))
+    panel.set_theme_mode("system", "light")
+    assert panel.light_theme_button.isChecked()
+    assert not panel.dark_theme_button.isChecked()
+    assert panel.light_theme_button.property("selected") is True
+    assert "跟随系统" in panel.theme_segment.toolTip()
+    assert "当前为浅色主题" in panel.light_theme_button.toolTip()
 
-        controller.start_drag("today", start)
-        controller.update_drag(reorder_target)
-        assert controller.order() == ["balance", "month", "today"]
-
-        controller.finish_drag(invalid_target)
-        APP.processEvents()
-        assert panel.layout_state()["top_cards"] == ["today", "balance", "month"]
-        save_layout.assert_not_called()
-        panel.close()
+    panel.set_theme_mode("system", "dark")
+    assert not panel.light_theme_button.isChecked()
+    assert panel.dark_theme_button.isChecked()
+    assert panel.dark_theme_button.property("selected") is True
+    assert "跟随系统" in panel.theme_segment.toolTip()
+    assert "当前为深色主题" in panel.dark_theme_button.toolTip()
+    panel.close()
 
 
-def test_small_pointer_move_does_not_start_drag_or_persist():
-    with (
-        patch("ui.qt_panel.config_manager.load_panel_layout_state", return_value={}),
-        patch("ui.qt_panel.config_manager.save_panel_layout_state") as save_layout,
-    ):
-        panel = MainPanel()
-        panel.resize(820, 550)
-        panel.show()
-        APP.processEvents()
+def test_existing_panel_switches_light_and_dark_without_refetching_or_rebinding_data():
+    controller = configure_theme(APP, "dark")
+    panel = MainPanel()
+    panel.update_data(sample_data())
+    panel.show()
+    APP.processEvents()
+    panel_identity = id(panel)
+    dark_background = panel.trend.plot.backgroundBrush().color()
 
-        controller = panel._top_card_reorder
-        controller.REORDER_DURATION_MS = 0
-        controller.DROP_DURATION_MS = 0
-        start = center_global(panel.today_card.drag_handle)
-        near = start + QPoint(controller.DRAG_THRESHOLD - 1, 0)
+    try:
+        with (
+            patch.object(panel, "update_data") as update_data,
+            patch.object(panel.trend, "set_rows") as set_rows,
+            patch.object(panel.activity, "set_activity") as set_activity,
+            patch.object(TokenData, "fetch") as fetch,
+        ):
+            controller.set_mode("light")
+            APP.processEvents()
+            light_background = panel.trend.plot.backgroundBrush().color()
 
-        controller.start_drag("today", start)
-        controller.update_drag(near)
-        controller.finish_drag(near)
-        APP.processEvents()
+            assert id(panel) == panel_identity
+            assert panel._resolved_theme == "light"
+            assert current_theme().name == "light"
+            assert light_background.name() == current_theme().window.lower()
+            assert light_background != dark_background
 
-        assert controller.order() == ["today", "balance", "month"]
-        assert not controller._drag_started
-        save_layout.assert_not_called()
-        panel.close()
-
-
-def test_inner_reorder_keeps_card_sizes_bound_to_card_type():
-    with patch("ui.qt_panel.config_manager.load_panel_layout_state", return_value={}):
-        panel = MainPanel()
-        panel.resize(820, 550)
-        panel.show()
-        APP.processEvents()
-
-        for controller in (panel._top_card_reorder, panel._bottom_card_reorder):
-            controller.REORDER_DURATION_MS = 0
-            controller.DROP_DURATION_MS = 0
-
-        top_widths_before = {
-            "today": panel.today_card.width(),
-            "balance": panel.balance_card.width(),
-            "month": panel.month_card.width(),
-        }
-        bottom_widths_before = {
-            "trend": panel.trend.width(),
-            "statistics": panel.statistics.width(),
-        }
-
-        top_target = panel.metrics_container.mapToGlobal(
-            QPoint(panel.metrics_container.width() - 4, panel.metrics_container.height() // 2)
-        )
-        bottom_target = panel.lower_container.mapToGlobal(
-            QPoint(4, panel.lower_container.height() // 2)
-        )
-
-        panel._top_card_reorder.start_drag("today", center_global(panel.today_card.drag_handle))
-        panel._top_card_reorder.update_drag(top_target)
-        panel._top_card_reorder.finish_drag(top_target)
-        APP.processEvents()
-
-        panel._bottom_card_reorder.start_drag("statistics", center_global(panel.statistics.drag_handle))
-        panel._bottom_card_reorder.update_drag(bottom_target)
-        panel._bottom_card_reorder.finish_drag(bottom_target)
-        APP.processEvents()
-
-        assert {panel.today_card.width(), panel.balance_card.width(), panel.month_card.width()} == {
-            top_widths_before["today"],
-            top_widths_before["balance"],
-            top_widths_before["month"],
-        }
-        assert panel.today_card.width() == top_widths_before["today"]
-        assert panel.balance_card.width() == top_widths_before["balance"]
-        assert panel.month_card.width() == top_widths_before["month"]
-        assert panel.trend.width() == bottom_widths_before["trend"]
-        assert panel.statistics.width() == bottom_widths_before["statistics"]
-        assert panel.trend.width() > panel.statistics.width()
-        panel.close()
-
-
-def test_dragged_layout_changes_persist_for_sections_and_cards():
-    with (
-        patch("ui.qt_panel.config_manager.load_panel_layout_state", return_value={}),
-        patch("ui.qt_panel.config_manager.save_panel_layout_state") as save_layout,
-    ):
-        panel = MainPanel()
-        panel.resize(820, 550)
-        panel.show()
-        APP.processEvents()
-
-        for controller in (panel._section_reorder, panel._top_card_reorder, panel._bottom_card_reorder):
-            controller.REORDER_DURATION_MS = 0
-            controller.DROP_DURATION_MS = 0
-
-        section_target = panel.sections_container.mapToGlobal(
-            QPoint(panel.sections_container.width() // 2, panel.sections_container.height() - 4)
-        )
-        panel._section_reorder.start_drag("top", center_global(panel.top_section.drag_handle))
-        panel._section_reorder.update_drag(section_target)
-        panel._section_reorder.finish_drag(section_target)
-        APP.processEvents()
-        saved_after_section = save_layout.call_count
-
-        top_card_target = panel.metrics_container.mapToGlobal(
-            QPoint(panel.metrics_container.width() - 4, panel.metrics_container.height() // 2)
-        )
-        bottom_card_target = panel.lower_container.mapToGlobal(
-            QPoint(4, panel.lower_container.height() // 2)
-        )
-
-        panel._top_card_reorder.start_drag("today", center_global(panel.today_card.drag_handle))
-        panel._top_card_reorder.update_drag(top_card_target)
-        assert save_layout.call_count == saved_after_section
-        panel._top_card_reorder.finish_drag(top_card_target)
-        APP.processEvents()
-
-        panel._bottom_card_reorder.start_drag("statistics", center_global(panel.statistics.drag_handle))
-        panel._bottom_card_reorder.update_drag(bottom_card_target)
-        panel._bottom_card_reorder.finish_drag(bottom_card_target)
-        APP.processEvents()
-
-        assert panel.layout_state() == {
-            "sections": ["middle", "bottom", "top"],
-            "top_cards": ["balance", "month", "today"],
-            "bottom_cards": ["statistics", "trend"],
-        }
-        assert save_layout.call_args_list[-1].args[0] == panel.layout_state()
+            controller.set_mode("dark")
+            APP.processEvents()
+            assert panel._resolved_theme == "dark"
+            assert panel.trend.plot.backgroundBrush().color() == dark_background
+            update_data.assert_not_called()
+            set_rows.assert_not_called()
+            set_activity.assert_not_called()
+            fetch.assert_not_called()
+    finally:
+        controller.set_mode("dark")
         panel.close()
 
 
@@ -470,8 +400,8 @@ def test_compact_ball_uses_smaller_size_and_keeps_free_drag_position():
         ):
             widget._clamp_to_work_area()
 
-        assert (widget.width(), widget.height()) == (96, 96)
-        assert (widget.ball.width(), widget.ball.height()) == (96, 96)
+        assert (widget.width(), widget.height()) == (88, 88)
+        assert (widget.ball.width(), widget.ball.height()) == (88, 88)
         assert (widget.x(), widget.y()) == (420, 260)
         save_position.assert_called_once_with(420, 260)
         widget._closed = True
@@ -511,6 +441,22 @@ def test_deactivation_collapses_panel_but_ignores_visible_settings():
                 widget._collapse_after_deactivation()
         assert not widget._expanded
         assert widget.ball.isVisible()
+        widget._settings_window = None
+        widget._closed = True
+        widget.hide()
+
+
+def test_expanded_panel_preserves_transparent_rounded_bottom_corners():
+    with patch("ui.qt_widget.FloatingWidget.refresh"):
+        widget = FloatingWidget()
+        widget.expand_panel()
+        APP.processEvents()
+        image = widget.grab().toImage()
+        right = image.width() - 1
+        bottom = image.height() - 1
+
+        assert image.pixelColor(0, bottom).alpha() == 0
+        assert image.pixelColor(right, bottom).alpha() == 0
         widget._closed = True
         widget.hide()
 
@@ -663,6 +609,39 @@ def test_settings_exposes_panel_auto_collapse_toggle():
     window.close()
 
 
+def test_settings_theme_selector_emits_all_modes_immediately_and_cancel_does_not_rollback():
+    values = {
+        **config_manager.all_config(),
+        "UI_THEME": "dark",
+    }
+    with (
+        patch("ui.qt_settings.config_manager.load_config", return_value=values),
+        patch("ui.qt_settings.config_manager.all_config", return_value=values),
+    ):
+        window = SettingsWindow()
+
+    requested: list[str] = []
+    window.theme_requested.connect(requested.append)
+    assert [
+        window.theme_combo.itemData(index)
+        for index in range(window.theme_combo.count())
+    ] == ["system", "light", "dark"]
+
+    for mode in ("system", "light", "dark"):
+        window.theme_combo.setCurrentIndex(window.theme_combo.findData(mode))
+        assert requested[-1] == mode
+        assert window._values()["UI_THEME"] == mode
+
+    window.theme_combo.setCurrentIndex(window.theme_combo.findData("light"))
+    emitted_before_cancel = list(requested)
+    window.reject()
+
+    assert window.theme_combo.currentData() == "light"
+    assert requested == emitted_before_cancel
+    assert "取消设置不会回滚主题" in window.theme_combo.toolTip()
+    window.close()
+
+
 def test_settings_separates_accounts_runtime_and_updates_into_tabs():
     with (
         patch("ui.qt_settings.config_manager.load_config", return_value=config_manager.all_config()),
@@ -778,7 +757,8 @@ def test_settings_window_wraps_content_in_scroll_area():
     window.close()
 
 
-def test_settings_window_keeps_dark_background_after_scroll_wrap():
+def test_existing_settings_window_follows_light_and_dark_after_scroll_wrap():
+    controller = configure_theme(APP, "dark")
     with (
         patch("ui.qt_settings.config_manager.load_config", return_value=config_manager.all_config()),
         patch("ui.qt_settings.config_manager.all_config", return_value=config_manager.all_config()),
@@ -787,8 +767,48 @@ def test_settings_window_keeps_dark_background_after_scroll_wrap():
 
     window.show()
     APP.processEvents()
-    image = window.grab().toImage()
-    sample = image.pixelColor(12, 12)
+    dark_sample = window.grab().toImage().pixelColor(12, 12)
 
-    assert max(sample.red(), sample.green(), sample.blue()) < 245
-    window.close()
+    try:
+        controller.set_mode("light")
+        APP.processEvents()
+        light_sample = window.grab().toImage().pixelColor(12, 12)
+
+        assert light_sample.name() == current_theme().window.lower()
+        assert light_sample != dark_sample
+        assert window.theme_combo.currentData() == "light"
+
+        controller.set_mode("dark")
+        APP.processEvents()
+        assert window.grab().toImage().pixelColor(12, 12) == dark_sample
+        assert window.theme_combo.currentData() == "dark"
+    finally:
+        controller.set_mode("dark")
+        window.close()
+
+
+def test_open_ball_and_update_dialog_retheme_in_place():
+    controller = configure_theme(APP, "dark")
+    ball = FloatingUsageBall(96)
+    ball.set_values("¥0.71", "¥0.47")
+    update_dialog = UpdatePromptDialog(sample_release())
+    ball.show()
+    update_dialog.show()
+    APP.processEvents()
+    ball_identity = id(ball)
+    dialog_identity = id(update_dialog)
+    dark_ball = ball.grab().toImage().pixelColor(48, 48)
+    dark_dialog = update_dialog.grab().toImage().pixelColor(12, 12)
+
+    try:
+        controller.set_mode("light")
+        APP.processEvents()
+
+        assert id(ball) == ball_identity
+        assert id(update_dialog) == dialog_identity
+        assert ball.grab().toImage().pixelColor(48, 48) != dark_ball
+        assert update_dialog.grab().toImage().pixelColor(12, 12) != dark_dialog
+    finally:
+        controller.set_mode("dark")
+        ball.close()
+        update_dialog.close()

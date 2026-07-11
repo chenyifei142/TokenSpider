@@ -1,14 +1,18 @@
 import os
 from datetime import date, timedelta
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
 from ui.activity import activity_levels, calendar_position, compact_tokens, normalize_activity
 from ui.qt_heatmap import ActivityTooltip, TokenActivityHeatmap
+from ui.qt_theme import configure_theme, current_theme
 
 APP = QApplication.instance() or QApplication([])
+configure_theme(APP, "dark")
 
 
 def test_activity_calendar_covers_a_full_year_and_complete_weeks():
@@ -127,6 +131,73 @@ def test_heatmap_renders_complete_calendar_grid():
     assert len(heatmap._hits) >= 365
     assert heatmap.minimumWidth() >= 560
     heatmap.close()
+
+
+def test_activity_tooltip_keeps_an_opaque_themed_surface():
+    controller = configure_theme(APP, "light")
+    end = date(2026, 7, 3)
+    heatmap = TokenActivityHeatmap()
+    heatmap.set_activity([{"date": end.isoformat(), "tokens": 100}], end)
+    heatmap.resize(heatmap.minimumSize())
+    heatmap.show()
+    APP.processEvents()
+    heatmap.grab()
+    day = next(item for item in heatmap.days if item.date == end)
+
+    try:
+        for mode in ("light", "dark"):
+            controller.set_mode(mode)
+            heatmap._tooltip.show_day(day, heatmap.rect().center())
+            APP.processEvents()
+            image = heatmap._tooltip.grab().toImage()
+            sample = image.pixelColor(image.width() - 8, image.height() - 8)
+
+            assert sample == QColor(current_theme().elevated)
+            assert sample.alpha() == 255
+    finally:
+        controller.set_mode("dark")
+        heatmap.close()
+
+
+def test_existing_heatmap_repaints_in_place_without_rebinding_activity():
+    controller = configure_theme(APP, "dark")
+    end = date(2026, 7, 3)
+    heatmap = TokenActivityHeatmap()
+    heatmap.set_activity([{"date": end.isoformat(), "tokens": 100}], end)
+    heatmap.resize(heatmap.minimumSize())
+    heatmap.show()
+    APP.processEvents()
+    heatmap_identity = id(heatmap)
+
+    week, weekday = calendar_position(end, heatmap.period.grid_start)
+    horizontal_step = max(
+        heatmap.CELL + heatmap.MIN_HORIZONTAL_GAP,
+        (heatmap.width() - heatmap.LEFT - 12) // heatmap.period.week_count,
+    )
+    center = (
+        heatmap.LEFT + week * horizontal_step + heatmap.CELL // 2,
+        heatmap.TOP + weekday * (heatmap.CELL + heatmap.GAP) + heatmap.CELL // 2,
+    )
+    dark_color = heatmap.grab().toImage().pixelColor(*center)
+    assert dark_color == QColor(current_theme().heat[5])
+
+    try:
+        with patch.object(heatmap, "set_activity") as set_activity:
+            controller.set_mode("light")
+            APP.processEvents()
+            light_color = heatmap.grab().toImage().pixelColor(*center)
+
+            assert id(heatmap) == heatmap_identity
+            assert light_color == QColor(current_theme().heat[5])
+            assert light_color != dark_color
+
+            controller.set_mode("dark")
+            APP.processEvents()
+            assert heatmap.grab().toImage().pixelColor(*center) == dark_color
+            set_activity.assert_not_called()
+    finally:
+        controller.set_mode("dark")
+        heatmap.close()
 
 
 def test_future_padding_uses_the_same_color_as_unused_days():

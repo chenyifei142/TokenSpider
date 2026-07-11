@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from PySide6.QtCore import QPoint, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
 
 from ui.activity import (
@@ -17,16 +17,7 @@ from ui.activity import (
     compact_tokens,
     normalize_activity,
 )
-from ui.qt_theme import (
-    C_ACCENT_2,
-    C_GLASS_BORDER,
-    C_HEAT,
-    C_PALE_BLUE,
-    C_SUBTEXT,
-    C_SURFACE,
-    C_TEXT,
-    C_TIME,
-)
+from ui.qt_theme import current_theme, theme_controller
 
 
 class ActivityTooltip(QFrame):
@@ -34,20 +25,23 @@ class ActivityTooltip(QFrame):
         super().__init__(parent)
         self.setObjectName("activityTooltip")
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setStyleSheet(
-            f"QFrame#activityTooltip {{ background: {C_SURFACE}; border: 1px solid {C_GLASS_BORDER}; "
-            f"border-radius: 9px; }} QLabel {{ color: {C_TEXT}; background: transparent; }}"
-        )
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 9, 12, 9)
         layout.setSpacing(4)
         self._title = QLabel()
         self._title.setStyleSheet("font-weight: 700;")
         self._body = QLabel()
-        self._body.setStyleSheet(f"color: {C_SUBTEXT};")
+        self._body.setProperty("tone", "muted")
         layout.addWidget(self._title)
         layout.addWidget(self._body)
         self.hide()
+        theme_controller().changed.connect(self._on_theme_changed)
+
+    def _on_theme_changed(self, _mode: str, _resolved: str) -> None:
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
 
     def show_day(self, day: TokenActivityDay, anchor: QPoint) -> None:
         self._title.setText(day.date.isoformat())
@@ -80,6 +74,7 @@ class TokenActivityHeatmap(QWidget):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
+        self.setObjectName("activityHeatmap")
         self.setMouseTracking(True)
         self._period, self._days = normalize_activity([])
         self._levels: dict[date, int] = {}
@@ -91,8 +86,13 @@ class TokenActivityHeatmap(QWidget):
         self.setMinimumWidth(width)
         self.setFixedHeight(height)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setStyleSheet("background: transparent;")
+        # The custom painter already owns the transparent canvas. Avoid a local
+        # stylesheet here because Qt cascades it into the child tooltip surface.
         self._tooltip = ActivityTooltip(self)
+        theme_controller().changed.connect(self._on_theme_changed)
+
+    def _on_theme_changed(self, _mode: str, _resolved: str) -> None:
+        self.update()
 
     @property
     def period(self) -> ActivityRange:
@@ -129,10 +129,14 @@ class TokenActivityHeatmap(QWidget):
         super().leaveEvent(event)
 
     def paintEvent(self, _event) -> None:
+        theme = current_theme()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        # Paint the single-surface panel color explicitly so a transparent
+        # scroll viewport cannot expose the desktop behind the heatmap.
+        painter.fillRect(self.rect(), QColor(theme.window))
         self._hits = []
         vertical_step = self.CELL + self.GAP
         # Horizontal spacing expands with the card so the year stays readable
@@ -143,7 +147,7 @@ class TokenActivityHeatmap(QWidget):
         )
 
         painter.setFont(QFont("Microsoft YaHei UI", 8))
-        painter.setPen(QColor(C_TIME))
+        painter.setPen(QColor(theme.muted))
         for weekday, label in ((0, "一"), (2, "三"), (4, "五"), (6, "日")):
             y = self.TOP + weekday * vertical_step
             painter.drawText(QRectF(0, y - 1, self.LEFT - 7, self.CELL + 2), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, label)
@@ -174,11 +178,11 @@ class TokenActivityHeatmap(QWidget):
             if day.date > self._period.end:
                 # Complete-week padding is not data; matching unused cells keeps
                 # future dates present without introducing a black visual break.
-                color = QColor(C_HEAT[0])
+                color = QColor(theme.heat[0])
             elif not in_range:
-                color = QColor(C_HEAT[0])
+                color = QColor(theme.heat[0])
             else:
-                color = QColor(C_HEAT[self._levels.get(day.date, 0)])
+                color = QColor(theme.heat[self._levels.get(day.date, 0)])
             level = self._levels.get(day.date, 0) if in_range else 0
             if level > 0:
                 # Keep the selected blue depth visible at 11 px without letting
@@ -188,21 +192,19 @@ class TokenActivityHeatmap(QWidget):
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(glow)
                 painter.drawRoundedRect(rect.adjusted(-0.8, -0.8, 0.8, 0.8), 3.2, 3.2)
-                gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-                gradient.setColorAt(0, color.lighter(106))
-                gradient.setColorAt(1, color)
-                painter.setBrush(QBrush(gradient))
+                painter.setBrush(color)
             else:
                 painter.setBrush(color)
             if day.date == self._hovered:
-                painter.setPen(QPen(QColor(C_PALE_BLUE), 1.5))
+                painter.setPen(QPen(QColor(theme.border_hover), 1.5))
             elif day.date == self._period.end:
-                painter.setPen(QPen(QColor(C_ACCENT_2), 1.2))
+                painter.setPen(QPen(QColor(theme.accent), 1.2))
             else:
-                # Empty cells need a stronger edge than active cells so the
-                # calendar grid remains legible against the dark card surface.
-                border_lightness = 135 if level == 0 else 112
-                painter.setPen(QPen(color.lighter(border_lightness), 0.7))
+                # Heatmap cells are decorative density marks, so their edges stay
+                # quieter than interactive control boundaries in both themes.
+                factor = 112 if level > 0 else 108
+                edge = color.lighter(factor) if theme.name == "dark" else color.darker(factor)
+                painter.setPen(QPen(edge, 0.7))
             painter.drawRoundedRect(rect, 2.8, 2.8)
             if day.date <= self._period.end:
                 self._hits.append((rect, day))

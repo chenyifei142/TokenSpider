@@ -43,7 +43,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "MIMO_API_KEY": "",
     "MIMO_BASE": "https://platform.xiaomimimo.com",
     "REFRESH_INTERVAL": 60_000,
-    "WIDGET_COMPACT_SIZE": 96,
+    "WIDGET_COMPACT_SIZE": 88,
     "WIDGET_EXPANDED_SIZE": (820, 564),
     "BG_COLOR": "#071427",
     "ACCENT_COLOR": "#2f6fe4",
@@ -51,6 +51,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "ACTIVE_PROVIDER": "deepseek",
     "EDGE_HIDE_ENABLED": True,
     "PANEL_AUTO_COLLAPSE_ON_DEACTIVATE": True,
+    "UI_THEME": "dark",
     "UPDATE_AUTO_CHECK_ENABLED": True,
     "UPDATE_CHANNEL": "stable",
     "UPDATE_SKIPPED_VERSION": "",
@@ -58,13 +59,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
 FIELD_META: dict[str, dict[str, Any]] = {
     **{key: {"kind": "text", "secret": key in SECRET_KEYS} for key in DEFAULT_CONFIG},
     "REFRESH_INTERVAL": {"kind": "int", "min": 5_000},
-    "WIDGET_COMPACT_SIZE": {"kind": "int", "min": 96, "max": 124},
+    "WIDGET_COMPACT_SIZE": {"kind": "int", "min": 88, "max": 124},
     "WIDGET_EXPANDED_SIZE": {"kind": "tuple_int"},
     "BG_COLOR": {"kind": "color"},
     "ACCENT_COLOR": {"kind": "color"},
     "TEXT_COLOR": {"kind": "color"},
     "EDGE_HIDE_ENABLED": {"kind": "bool"},
     "PANEL_AUTO_COLLAPSE_ON_DEACTIVATE": {"kind": "bool"},
+    "UI_THEME": {"kind": "choice", "choices": ("system", "light", "dark")},
     "UPDATE_AUTO_CHECK_ENABLED": {"kind": "bool"},
 }
 
@@ -277,6 +279,12 @@ def validate_value(key: str, value: Any) -> Any:
             if normalized in {"0", "false", "no", "off"}:
                 return False
         raise ValueError(f"{key} 必须是布尔值")
+    if kind == "choice":
+        normalized = str(value).strip().lower()
+        if normalized not in meta["choices"]:
+            choices = ", ".join(meta["choices"])
+            raise ValueError(f"{key} must be one of: {choices}")
+        return normalized
     return str(value)
 
 
@@ -334,10 +342,11 @@ def _load_public_config() -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("config.json 顶层必须是对象")
     value.pop("credential_store", None)
-    compact_size = int(value.get("WIDGET_COMPACT_SIZE", 96))
-    # 108 和 120 是前两版默认值；只迁移默认值以保留其他合法自定义尺寸。
-    if compact_size < 96 or compact_size in (108, 120):
-        value["WIDGET_COMPACT_SIZE"] = 96
+    compact_size = int(value.get("WIDGET_COMPACT_SIZE", 88))
+    # 96/108/120 were earlier defaults rather than user choices; migrate only
+    # those known defaults so other valid custom sizes remain untouched.
+    if compact_size < 88 or compact_size in (96, 108, 120):
+        value["WIDGET_COMPACT_SIZE"] = 88
     panel_size = value.get("WIDGET_EXPANDED_SIZE", [820, 564])
     if isinstance(panel_size, (list, tuple)) and len(panel_size) == 2:
         if int(panel_size[0]) < 680 or int(panel_size[1]) < 564:
@@ -507,6 +516,38 @@ def save_config(values: dict[str, Any]) -> dict[str, Any]:
                 logger().exception("Credential rollback failed for %s", key)
         logger().exception("Config save failed; public config was not replaced: %s", exc)
         raise
+
+
+def save_ui_theme(mode: str) -> str:
+    """Atomically persist only the public theme preference."""
+    global _config
+    normalized = validate_value("UI_THEME", mode)
+    temp_path = CONFIG_PATH.with_name(f"{CONFIG_PATH.name}.theme.tmp")
+    try:
+        if CONFIG_PATH.exists():
+            public_values = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            if not isinstance(public_values, dict):
+                raise ValueError("config.json top level must be an object")
+        else:
+            public_values = _public_values(DEFAULT_CONFIG)
+
+        # Read from disk instead of an in-memory settings draft, and strip any
+        # accidentally persisted secrets so a theme click can never expose them.
+        for key in SECRET_KEYS:
+            public_values.pop(key, None)
+        public_values["credential_store"] = "windows-credential-manager"
+        public_values["UI_THEME"] = normalized
+        _write_json(temp_path, public_values)
+        temp_path.replace(CONFIG_PATH)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        logger().exception("Theme preference could not be saved")
+        raise
+
+    updated = _config.copy()
+    updated["UI_THEME"] = normalized
+    _config = updated
+    return normalized
 
 
 load_config()

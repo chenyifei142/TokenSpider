@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Union
 
-from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtCore import QSignalBlocker, QThread, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -33,7 +33,7 @@ import config_manager
 from api.providers import PROVIDERS, list_providers
 from api.providers.base import FetchError
 from data.store import TokenData
-from ui.qt_theme import C_GREEN, C_PANEL, C_RED, C_SUBTEXT
+from ui.qt_theme import theme_controller
 from ui.qt_update import AppUpdateController
 
 _CARD_PADDING = 18
@@ -83,6 +83,8 @@ class _CookieAcquireWorker(QThread):
 
 
 class SettingsWindow(QDialog):
+    theme_requested = Signal(str)
+
     def __init__(
         self,
         parent=None,
@@ -114,9 +116,7 @@ class SettingsWindow(QDialog):
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll_area.viewport().setStyleSheet(f"background: {C_PANEL};")
         self.content = QWidget()
-        self.content.setStyleSheet(f"background: {C_PANEL};")
         self.scroll_area.setWidget(self.content)
         content_layout = QVBoxLayout(self.content)
         content_layout.setContentsMargins(6, 4, 6, 8)
@@ -139,10 +139,7 @@ class SettingsWindow(QDialog):
 
         # Credentials card — rebuild when the selected provider changes.
         self.credentials_card = QFrame()
-        self.credentials_card.setObjectName("credentialsCard")
-        self.credentials_card.setStyleSheet(
-            "QFrame#credentialsCard { border: 1px solid #e5e7eb; border-radius: 10px; }"
-        )
+        self.credentials_card.setObjectName("settingsCard")
         self.credentials_layout = QVBoxLayout(self.credentials_card)
         self.credentials_layout.setContentsMargins(_CARD_PADDING, 14, _CARD_PADDING, 14)
         self.credentials_layout.setSpacing(10)
@@ -155,7 +152,8 @@ class SettingsWindow(QDialog):
         connection_actions.addStretch(1)
         self.connection_feedback = QLabel()
         self.connection_feedback.setWordWrap(True)
-        self.connection_feedback.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
+        self.connection_feedback.setProperty("tone", "muted")
+        self.connection_feedback.setStyleSheet("font-size: 12px;")
 
         content_layout.addWidget(title)
         content_layout.addLayout(picker_row)
@@ -174,7 +172,8 @@ class SettingsWindow(QDialog):
         runtime_layout.addWidget(runtime_title)
         runtime_hint = QLabel("控制数据刷新，以及悬浮球和面板在桌面的显示方式。")
         runtime_hint.setWordWrap(True)
-        runtime_hint.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
+        runtime_hint.setProperty("tone", "muted")
+        runtime_hint.setStyleSheet("font-size: 12px;")
         runtime_layout.addWidget(runtime_hint)
         runtime_card = QFrame()
         runtime_card.setObjectName("settingsCard")
@@ -187,6 +186,12 @@ class SettingsWindow(QDialog):
         self.refresh_seconds.setRange(5, 3600)
         self.refresh_seconds.setSuffix(" 秒")
         runtime_form.addRow("刷新间隔", self.refresh_seconds)
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("跟随系统", "system")
+        self.theme_combo.addItem("浅色", "light")
+        self.theme_combo.addItem("深色", "dark")
+        self.theme_combo.setToolTip("主题会立即应用并保存，取消设置不会回滚主题")
+        runtime_form.addRow("外观主题", self.theme_combo)
         self.edge_hide_check = QCheckBox("贴边自动隐藏")
         self.edge_hide_check.setToolTip("拖拽悬浮球到屏幕边缘后自动隐藏，鼠标移入时显示")
         runtime_form.addRow("贴边隐藏", self.edge_hide_check)
@@ -217,7 +222,8 @@ class SettingsWindow(QDialog):
         self.update_channel_combo.addItem("预发布版", "prerelease")
         self.update_status_label = QLabel()
         self.update_status_label.setWordWrap(True)
-        self.update_status_label.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
+        self.update_status_label.setProperty("tone", "muted")
+        self.update_status_label.setStyleSheet("font-size: 12px;")
         update_form.addRow("当前版本", self.current_version_label)
         update_form.addRow("自动检查", self.auto_check_updates)
         update_form.addRow("更新通道", self.update_channel_combo)
@@ -250,7 +256,8 @@ class SettingsWindow(QDialog):
         root.addWidget(self.tabs, 1)
         self.save_feedback = QLabel()
         self.save_feedback.setWordWrap(True)
-        self.save_feedback.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
+        self.save_feedback.setProperty("tone", "muted")
+        self.save_feedback.setStyleSheet("font-size: 12px;")
         root.addWidget(self.save_feedback)
         actions = QHBoxLayout()
         cancel = QPushButton("取消")
@@ -264,6 +271,8 @@ class SettingsWindow(QDialog):
         root.addLayout(actions)
         self.tabs.currentChanged.connect(lambda _index: self._sync_window_size())
         self._load_values()
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        theme_controller().changed.connect(self._on_theme_state_changed)
         self._bind_update_controller()
         self._sync_window_size()
 
@@ -293,6 +302,34 @@ class SettingsWindow(QDialog):
         self._remember_visible_credentials()
         provider_id = self.provider_combo.currentData()
         self._render_credentials(provider_id)
+
+    def _on_theme_changed(self, _index: int) -> None:
+        mode = str(self.theme_combo.currentData() or "dark")
+        self.theme_requested.emit(mode)
+
+    def _on_theme_state_changed(self, mode: str, _resolved: str) -> None:
+        self.set_theme_mode(mode)
+
+    def set_theme_mode(self, mode: str) -> None:
+        """Synchronize the selector without requesting the same change again."""
+
+        index = self.theme_combo.findData(mode)
+        if index < 0:
+            index = self.theme_combo.findData("dark")
+        blocker = QSignalBlocker(self.theme_combo)
+        self.theme_combo.setCurrentIndex(index)
+        del blocker
+
+    def set_theme_feedback(self, message: str, tone: str = "muted") -> None:
+        self._set_feedback(self.save_feedback, message, tone)
+
+    @staticmethod
+    def _set_feedback(label: QLabel, message: str, tone: str) -> None:
+        label.setProperty("tone", tone)
+        label.setText(message)
+        label.style().unpolish(label)
+        label.style().polish(label)
+        label.update()
 
     def open_provider(self, provider_id: str, start_cookie_acquisition: bool = False) -> None:
         """Focus a provider and optionally begin the browser flow from a tray alert."""
@@ -506,7 +543,8 @@ class SettingsWindow(QDialog):
         self._cookie_finish_button.clicked.connect(self._finish_cookie_acquire)
         self._cookie_acquire_status = QLabel("通过独立浏览器登录后，可将 Cookie 自动填回此处。")
         self._cookie_acquire_status.setWordWrap(True)
-        self._cookie_acquire_status.setStyleSheet(f"color: {C_SUBTEXT}; font-size: 12px;")
+        self._cookie_acquire_status.setProperty("tone", "muted")
+        self._cookie_acquire_status.setStyleSheet("font-size: 12px;")
         layout.addWidget(self._cookie_acquire_button)
         layout.addWidget(self._cookie_finish_button)
         layout.addWidget(self._cookie_acquire_status, 1)
@@ -542,6 +580,7 @@ class SettingsWindow(QDialog):
     def _load_values(self) -> None:
         values = config_manager.load_config()
         self.refresh_seconds.setValue(max(5, int(values.get("REFRESH_INTERVAL", 60_000)) // 1000))
+        self.set_theme_mode(str(values.get("UI_THEME", "dark")))
         self.edge_hide_check.setChecked(bool(values.get("EDGE_HIDE_ENABLED", True)))
         self.panel_auto_collapse_check.setChecked(
             bool(values.get("PANEL_AUTO_COLLAPSE_ON_DEACTIVATE", True))
@@ -564,6 +603,7 @@ class SettingsWindow(QDialog):
         values: dict[str, Any] = {
             "REFRESH_INTERVAL": self.refresh_seconds.value() * 1000,
             "ACTIVE_PROVIDER": str(self.provider_combo.currentData() or ""),
+            "UI_THEME": str(self.theme_combo.currentData() or "dark"),
             "EDGE_HIDE_ENABLED": self.edge_hide_check.isChecked(),
             "PANEL_AUTO_COLLAPSE_ON_DEACTIVATE": self.panel_auto_collapse_check.isChecked(),
             "UPDATE_AUTO_CHECK_ENABLED": self.auto_check_updates.isChecked(),
@@ -614,12 +654,14 @@ class SettingsWindow(QDialog):
         try:
             config_manager.save_config(values)
         except Exception as exc:
-            self.save_feedback.setStyleSheet(f"color: {C_RED};")
-            self.save_feedback.setText(f"保存失败，配置已回滚：{exc}")
+            self._set_feedback(self.save_feedback, f"保存失败，配置已回滚：{exc}", "danger")
             return
-        self.save_feedback.setStyleSheet(f"color: {C_GREEN};")
         active_id = str(values.get("ACTIVE_PROVIDER", ""))
-        self.save_feedback.setText(f"已使用 {active_id or '默认'} 作为数据来源，配置已保存。")
+        self._set_feedback(
+            self.save_feedback,
+            f"已使用 {active_id or '默认'} 作为数据来源，配置已保存。",
+            "success",
+        )
         if self.update_controller is not None:
             self.update_controller.reload_cached_release()
         if self.on_saved:
@@ -631,27 +673,35 @@ class SettingsWindow(QDialog):
             self._test_config_backup = config_manager.all_config()
             config_manager._config.update(candidate)
         except Exception as exc:
-            self.connection_feedback.setStyleSheet(f"color: {C_RED};")
-            self.connection_feedback.setText(f"请先修正配置：{exc}")
+            self._set_feedback(
+                self.connection_feedback, f"请先修正配置：{exc}", "danger"
+            )
             return
         self.test_button.setEnabled(False)
         self.test_button.setText("测试中…")
-        self.connection_feedback.setStyleSheet(f"color: {C_SUBTEXT};")
-        self.connection_feedback.setText("正在使用当前输入的凭据测试连接…")
+        self._set_feedback(
+            self.connection_feedback, "正在使用当前输入的凭据测试连接…", "muted"
+        )
         self._worker = ConnectionWorker(self)
         self._worker.finished_with_data.connect(self._connection_result)
         self._worker.start()
 
     def _connection_result(self, data: TokenData) -> None:
         if self._test_config_backup is not None:
-            config_manager._config = self._test_config_backup
+            # Theme changes are saved immediately while the connection worker is
+            # running, so restoring credential drafts must preserve that newer mode.
+            active_theme = config_manager._config.get(
+                "UI_THEME", self._test_config_backup.get("UI_THEME", "dark")
+            )
+            restored = self._test_config_backup.copy()
+            restored["UI_THEME"] = active_theme
+            config_manager._config = restored
             self._test_config_backup = None
         self.test_button.setEnabled(True)
         self.test_button.setText("测试连接")
         if data.status in {"ok", "partial"}:
             if data.status == "ok":
-                self.connection_feedback.setStyleSheet(f"color: {C_GREEN};")
-                self.connection_feedback.setText("连接成功。")
+                self._set_feedback(self.connection_feedback, "连接成功。", "success")
             else:
                 # Collect all error messages from providers that had issues.
                 error_messages: list[str] = []
@@ -659,12 +709,12 @@ class SettingsWindow(QDialog):
                     for err in per.errors:
                         error_messages.append(f"[{per.provider_name}] {err.message}")
                 detail = "\n".join(error_messages) if error_messages else "未知错误"
-                self.connection_feedback.setStyleSheet(f"color: {C_RED};")
-                self.connection_feedback.setText(f"连接失败：\n{detail}")
+                self._set_feedback(
+                    self.connection_feedback, f"连接失败：\n{detail}", "danger"
+                )
         else:
             message = data.errors[0].message if data.errors else "连接失败"
-            self.connection_feedback.setStyleSheet(f"color: {C_RED};")
-            self.connection_feedback.setText(message)
+            self._set_feedback(self.connection_feedback, message, "danger")
         self._worker = None
 
 
