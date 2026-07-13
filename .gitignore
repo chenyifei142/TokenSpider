@@ -30,5 +30,6 @@ _deepcopy_test.py
 
 # 一次性设计验收产物不属于发布源码，避免后续误提交。
 qa-*.png
+.codex-design-qa/
 design-qa.md
 *_Codex提示词.md

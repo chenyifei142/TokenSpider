@@ -56,6 +56,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "UPDATE_AUTO_CHECK_ENABLED": True,
     "UPDATE_CHANNEL": "stable",
     "UPDATE_SKIPPED_VERSION": "",
+    "MINUTE_USAGE_RETENTION_DAYS": 3,
 }
 FIELD_META: dict[str, dict[str, Any]] = {
     **{key: {"kind": "text", "secret": key in SECRET_KEYS} for key in DEFAULT_CONFIG},
@@ -69,6 +70,7 @@ FIELD_META: dict[str, dict[str, Any]] = {
     "PANEL_AUTO_COLLAPSE_ON_DEACTIVATE": {"kind": "bool"},
     "UI_THEME": {"kind": "choice", "choices": ("system", "light", "dark")},
     "UPDATE_AUTO_CHECK_ENABLED": {"kind": "bool"},
+    "MINUTE_USAGE_RETENTION_DAYS": {"kind": "int", "min": 1, "max": 365},
 }
 
 
@@ -202,6 +204,17 @@ def _migrate_data_dir(source: Path, target: Path) -> None:
             temp_path.replace(destination)
 
 
+def _remove_migrated_data_dir(source: Path) -> None:
+    source = source.resolve(strict=False)
+    for item in _data_entries(source):
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+    if source != DEFAULT_CONFIG_DIR.resolve(strict=False):
+        source.rmdir()
+
+
 def _initialize_data_dir() -> tuple[Path, dict[str, Any]]:
     DEFAULT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     state = _load_location_state()
@@ -231,6 +244,14 @@ def _initialize_data_dir() -> tuple[Path, dict[str, Any]]:
         else:
             active_dir = pending_dir
             state = next_state
+            try:
+                _remove_migrated_data_dir(source_dir)
+            except OSError as exc:
+                state = {**state, "migration_error": f"原应用数据目录清理失败：{exc}"}
+                try:
+                    _write_location_state(state)
+                except OSError:
+                    pass
 
     try:
         active_dir.mkdir(parents=True, exist_ok=True)

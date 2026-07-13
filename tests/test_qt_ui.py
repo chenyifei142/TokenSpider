@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["APPDATA"] = str(Path.cwd() / ".test-appdata")
 
 import pyqtgraph as pg
+import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
@@ -170,9 +171,22 @@ def test_minute_chart_tooltip_legend_and_navigator_preserve_raw_series():
         {"minute": 600, "token_type": "PROMPT_CACHE_MISS_TOKEN", "token_amount": 20},
         {"minute": 600, "token_type": "RESPONSE_TOKEN", "token_amount": 10},
     ]
+    rows.extend(
+        {"minute": minute, "token_type": "RESPONSE_TOKEN", "token_amount": 1}
+        for minute in range(601, 625)
+    )
     chart.set_rows(rows, "recorded")
     chart.show()
     APP.processEvents()
+
+    initial_left, initial_right = chart.plot.getViewBox().viewRange()[0]
+    assert initial_right - initial_left == pytest.approx(24)
+    assert initial_left < 624 <= initial_right
+    assert chart._nav_bars.zValue() > chart.region.zValue()
+    assert chart._nav_handles.zValue() > chart._nav_bars.zValue()
+    nav_left, nav_right = chart.navigator.getViewBox().viewRange()[0]
+    assert nav_left == pytest.approx(-0.5)
+    assert nav_right == pytest.approx(1439.5)
 
     tooltip = chart.tooltip_text(600)
     assert "10:00" in tooltip
@@ -181,14 +195,129 @@ def test_minute_chart_tooltip_legend_and_navigator_preserve_raw_series():
     assert "输出　10" in tooltip
     assert "总计 110" in tooltip
     assert "缓存命中率　80.0%" in tooltip
+    assert chart._bars["RESPONSE_TOKEN"].opts["height"][600] == 10
+    assert chart._bars["PROMPT_CACHE_MISS_TOKEN"].opts["y0"][600] == 10
+    assert chart._bars["PROMPT_CACHE_HIT_TOKEN"].opts["y0"][600] == 30
+    chart._show_hover(600, QPoint(120, 50))
+    assert chart.hover_tooltip.isVisible()
+    assert chart.hover_tooltip.time_label.text() == "10:00"
+    assert chart._hover_line.isVisible()
+    assert chart._hover_bar.isVisible()
     chart.set_series_visible("RESPONSE_TOKEN", False)
-    assert not chart._fills["RESPONSE_TOKEN"].isVisible()
+    assert not chart._bars["RESPONSE_TOKEN"].isVisible()
+    assert chart._bars["PROMPT_CACHE_MISS_TOKEN"].opts["y0"][600] == 0
+    assert chart._bars["PROMPT_CACHE_HIT_TOKEN"].opts["y0"][600] == 20
     assert chart.tooltip_text(600) == tooltip
-    chart.region.setRegion((480, 720))
+    chart.region.setRegion((480.5, 504.5))
     APP.processEvents()
     left, right = chart.plot.getViewBox().viewRange()[0]
-    assert left <= 480 <= right
-    assert left <= 720 <= right
+    assert left == pytest.approx(480.5)
+    assert right == pytest.approx(504.5)
+    chart.close()
+
+
+def test_minute_chart_uses_compact_range_for_up_to_24_nonzero_minutes():
+    chart = MinuteUsageChart()
+    chart.resize(900, 180)
+    chart.show()
+
+    for count in (1, 5, 12, 24):
+        rows = [
+            {
+                "minute": 600 + index,
+                "token_type": "PROMPT_CACHE_HIT_TOKEN",
+                "token_amount": 100,
+            }
+            for index in range(count)
+        ]
+        chart.set_rows(rows, "recorded")
+        APP.processEvents()
+        left, right = chart.plot.getViewBox().viewRange()[0]
+        assert chart._sparse_mode
+        assert left <= 600
+        assert right >= 600 + count - 1
+        assert right - left <= max(1.5, count)
+        nav_left, nav_right = chart.navigator.getViewBox().viewRange()[0]
+        assert nav_left == pytest.approx(-0.5)
+        assert nav_right == pytest.approx(1439.5)
+        assert chart._minute_at_x(left + 0.01) == 600
+        assert chart._minute_at_x(right - 0.01) == 600 + count - 1
+        pixel_width = chart._bar_width * chart.plot.getViewBox().width() / (right - left)
+        assert chart.BAR_MIN_WIDTH_PX <= pixel_width <= chart.BAR_MAX_WIDTH_PX + 0.5
+
+    chart.close()
+
+
+def test_minute_chart_hides_tooltip_when_pointer_leaves_bar():
+    chart = MinuteUsageChart()
+    chart.set_rows(
+        [{"minute": 600, "token_type": "RESPONSE_TOKEN", "token_amount": 100}],
+        "recorded",
+    )
+    chart.show()
+    APP.processEvents()
+
+    chart._on_mouse_moved(
+        (chart.plot.getViewBox().mapViewToScene(QPointF(600, 50)),)
+    )
+    assert chart.hover_tooltip.isVisible()
+    chart._on_mouse_moved(
+        (chart.plot.getViewBox().mapViewToScene(QPointF(600, 101)),)
+    )
+    assert not chart.hover_tooltip.isVisible()
+    chart.close()
+
+
+def test_minute_chart_keeps_existing_navigation_for_more_than_24_minutes():
+    for count in (25, 100):
+        chart = MinuteUsageChart()
+        rows = [
+            {
+                "minute": 720 + index,
+                "token_type": "PROMPT_CACHE_HIT_TOKEN",
+                "token_amount": 100,
+            }
+            for index in range(count)
+        ]
+        chart.set_rows(rows, "recorded")
+        APP.processEvents()
+
+        assert not chart._sparse_mode
+        left, right = chart.plot.getViewBox().viewRange()[0]
+        assert right - left == pytest.approx(24)
+        assert left < 720 + count - 1 <= right
+        chart.region.setRegion((480.5, 504.5))
+        APP.processEvents()
+        left, right = chart.plot.getViewBox().viewRange()[0]
+        assert left == pytest.approx(480.5)
+        assert right == pytest.approx(504.5)
+        chart.close()
+
+
+def test_minute_chart_sparse_distant_points_keep_real_timeline_and_focus_latest():
+    chart = MinuteUsageChart()
+    rows = [
+        {"minute": 60, "token_type": "RESPONSE_TOKEN", "token_amount": 10},
+        {"minute": 600, "token_type": "RESPONSE_TOKEN", "token_amount": 20},
+    ]
+    chart.set_rows(rows, "recorded")
+
+    left, right = chart.plot.getViewBox().viewRange()[0]
+    assert chart._sparse_mode
+    assert right - left == pytest.approx(24)
+    assert left < 600 <= right
+    assert not left <= 60 <= right
+    assert chart._nav_bars.opts["x"] == [60, 600]
+    chart.close()
+
+
+def test_minute_chart_zero_rows_keeps_empty_state_instead_of_compact_range():
+    chart = MinuteUsageChart()
+    chart.set_rows([], "empty")
+
+    assert not chart.chart_container.isVisible()
+    assert chart.state_label.text() == "今日暂无 Token 消耗"
+    assert chart.summary_text() == "今日 0 · 缓存命中 -- · 峰值 --"
     chart.close()
 
 
@@ -199,6 +328,10 @@ def test_minute_chart_handles_zero_cache_denominator_and_panel_defaults_to_annua
         "recorded",
     )
     assert "缓存命中率　--" in chart.tooltip_text(1)
+    assert "总计 0" in chart.tooltip_text(2)
+    assert chart._minute_at_x(2.0) == 2
+    hit, miss, output = chart._colors()
+    assert hit.lightness() > miss.lightness() > output.lightness()
     panel = MainPanel()
     panel.update_data(sample_data())
     assert panel.activity_stack.currentIndex() == 0
@@ -207,7 +340,9 @@ def test_minute_chart_handles_zero_cache_denominator_and_panel_defaults_to_annua
     assert panel.activity_stack.currentIndex() == 1
     assert panel.minute_activity_button.isChecked()
     assert not panel.minute_estimate_label.isHidden()
-    assert "按刷新间隔均摊" in panel.minute_estimate_label.text()
+    assert panel.minute_estimate_label.text() == "估算"
+    assert "按刷新间隔均摊" in panel.minute_estimate_label.toolTip()
+    assert not panel.activity_summary.text().startswith("估算")
     assert not panel.minute_previous_button.isEnabled()
     assert not panel.minute_next_button.isEnabled()
     panel.close()
@@ -240,11 +375,11 @@ def test_panel_uses_fixed_v3_layout_budget_and_fluent_actions():
     assert PANEL_MIN_WIDTH == 640
     assert PANEL_MAX_WIDTH == 820
     assert PANEL_HEIGHT == 550
-    assert HEADER_HEIGHT == 50
-    assert TOP_SECTION_HEIGHT == 154
-    assert ACTIVITY_SECTION_HEIGHT == 176
-    assert STATISTICS_SECTION_HEIGHT == 92
-    assert STATUS_SECTION_HEIGHT == 38
+    assert HEADER_HEIGHT == 42
+    assert TOP_SECTION_HEIGHT == 160
+    assert ACTIVITY_SECTION_HEIGHT == 230
+    assert STATISTICS_SECTION_HEIGHT == 76
+    assert STATUS_SECTION_HEIGHT == 40
     assert panel.minimumSize().width() == PANEL_MIN_WIDTH
     assert panel.maximumSize().width() == PANEL_MAX_WIDTH
     assert panel.minimumSize().height() == PANEL_HEIGHT
@@ -262,6 +397,8 @@ def test_panel_uses_fixed_v3_layout_budget_and_fluent_actions():
         label.alignment() & Qt.AlignmentFlag.AlignHCenter
         for label in panel.statistics._names + panel.statistics._values
     )
+    assert [button.width() for button in panel.minute_legend_buttons.values()] == [64, 54, 44]
+    assert panel.activity_summary.minimumWidth() == 200
     assert all(
         0 <= value.mapTo(panel.statistics, QPoint()).y()
         and value.mapTo(panel.statistics, QPoint()).y() + value.height()
@@ -658,6 +795,23 @@ def test_settings_exposes_panel_auto_collapse_toggle():
     assert not window.panel_auto_collapse_check.isChecked()
     window.panel_auto_collapse_check.setChecked(True)
     assert window._values()["PANEL_AUTO_COLLAPSE_ON_DEACTIVATE"] is True
+    window.close()
+
+
+def test_settings_exposes_minute_usage_retention_days():
+    values = {
+        **config_manager.all_config(),
+        "MINUTE_USAGE_RETENTION_DAYS": 7,
+    }
+    with (
+        patch("ui.qt_settings.config_manager.load_config", return_value=values),
+        patch("ui.qt_settings.config_manager.all_config", return_value=values),
+    ):
+        window = SettingsWindow()
+
+    assert window.minute_usage_retention_days.value() == 7
+    window.minute_usage_retention_days.setValue(14)
+    assert window._values()["MINUTE_USAGE_RETENTION_DAYS"] == 14
     window.close()
 
 

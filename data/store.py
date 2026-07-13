@@ -323,8 +323,11 @@ class TokenData:
         minute_status = "unavailable"
         if getattr(provider, "supports_estimated_minute_usage", False):
             try:
-                # 每次启动/刷新均尝试按提供商自然日清理；失败不能影响原有账单刷新。
-                history.clear_expired_minute_usage(provider.id, current_day)
+                # 每次启动/刷新均按设置的保留天数清理；失败不能影响原有账单刷新。
+                retention_days = int(config_manager.get("MINUTE_USAGE_RETENTION_DAYS", 3))
+                history.clear_expired_minute_usage(
+                    provider.id, current_day, retention_days
+                )
                 minute_rows = history.minute_usage_for_day(provider.id, current_day)
                 minute_status = "empty"
             except Exception:
@@ -429,7 +432,11 @@ class TokenData:
                     else:
                         try:
                             minute_status = history.save_estimated_minute_usage(
-                                provider.id, current_day, token_totals, observed_at
+                                provider.id,
+                                current_day,
+                                token_totals,
+                                observed_at,
+                                retention_days,
                             )
                             minute_rows = history.minute_usage_for_day(provider.id, current_day)
                         except Exception:

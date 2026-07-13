@@ -187,6 +187,11 @@ class SettingsWindow(QDialog):
         self.refresh_seconds.setRange(5, 3600)
         self.refresh_seconds.setSuffix(" 秒")
         runtime_form.addRow("刷新间隔", self.refresh_seconds)
+        self.minute_usage_retention_days = QSpinBox()
+        self.minute_usage_retention_days.setRange(1, 365)
+        self.minute_usage_retention_days.setSuffix(" 天")
+        self.minute_usage_retention_days.setToolTip("保留最近 N 天分时估算数据，包含当天；程序启动后自动清理更早数据")
+        runtime_form.addRow("分时数据保存天数", self.minute_usage_retention_days)
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("跟随系统", "system")
         self.theme_combo.addItem("浅色", "light")
@@ -622,6 +627,9 @@ class SettingsWindow(QDialog):
     def _load_values(self) -> None:
         values = config_manager.load_config()
         self.refresh_seconds.setValue(max(5, int(values.get("REFRESH_INTERVAL", 60_000)) // 1000))
+        self.minute_usage_retention_days.setValue(
+            int(values.get("MINUTE_USAGE_RETENTION_DAYS", 3))
+        )
         self.set_theme_mode(str(values.get("UI_THEME", "dark")))
         self.edge_hide_check.setChecked(bool(values.get("EDGE_HIDE_ENABLED", True)))
         self.panel_auto_collapse_check.setChecked(
@@ -662,6 +670,7 @@ class SettingsWindow(QDialog):
         self._remember_visible_credentials()
         values: dict[str, Any] = {
             "REFRESH_INTERVAL": self.refresh_seconds.value() * 1000,
+            "MINUTE_USAGE_RETENTION_DAYS": self.minute_usage_retention_days.value(),
             "ACTIVE_PROVIDER": str(self.provider_combo.currentData() or ""),
             "UI_THEME": str(self.theme_combo.currentData() or "dark"),
             "EDGE_HIDE_ENABLED": self.edge_hide_check.isChecked(),
@@ -772,7 +781,7 @@ class SettingsWindow(QDialog):
             QMessageBox.information(
                 self,
                 "重启后迁移",
-                "全部应用数据将在下次启动时迁移。迁移成功后才会切换目录，原目录会保留。",
+                "全部应用数据将在下次启动时迁移。迁移成功后才会切换目录，并清理原数据目录。",
             )
 
     def _test_connection(self) -> None:

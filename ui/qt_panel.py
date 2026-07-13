@@ -7,13 +7,16 @@ from decimal import Decimal
 
 import pyqtgraph as pg
 from PySide6.QtCore import QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QScrollArea,
+    QSizePolicy,
+    QSpacerItem,
     QStackedWidget,
     QStyle,
     QToolButton,
@@ -32,12 +35,12 @@ from ui.qt_theme import app_icon, current_theme, fluent_icon, theme_controller
 PANEL_MIN_WIDTH = 640
 PANEL_MAX_WIDTH = 820
 PANEL_HEIGHT = 550
-HEADER_HEIGHT = 50
-TOP_SECTION_HEIGHT = 154
-ACTIVITY_SECTION_HEIGHT = 176
-STATISTICS_SECTION_HEIGHT = 92
-STATUS_SECTION_HEIGHT = 38
-SECTION_SPACING = 8
+HEADER_HEIGHT = 42
+TOP_SECTION_HEIGHT = 160
+ACTIVITY_SECTION_HEIGHT = 230
+STATISTICS_SECTION_HEIGHT = 76
+STATUS_SECTION_HEIGHT = 40
+SECTION_SPACING = 0
 SECTION_HORIZONTAL_MARGIN = 22
 
 
@@ -339,8 +342,88 @@ class TrendCard(QFrame):
         )
 
 
+class MinuteUsageTooltip(QFrame):
+    """图内悬停明细，避免系统提示框遮挡或离开图表。"""
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setObjectName("minuteTooltip")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(9, 7, 9, 7)
+        layout.setSpacing(5)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        self.time_label = QLabel("00:00")
+        self.time_label.setObjectName("minuteTooltipTitle")
+        self.total_label = QLabel("总计 0")
+        self.total_label.setObjectName("minuteTooltipValue")
+        header.addWidget(self.time_label)
+        header.addStretch(1)
+        header.addWidget(self.total_label)
+        layout.addLayout(header)
+
+        rows = QGridLayout()
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setHorizontalSpacing(7)
+        rows.setVerticalSpacing(3)
+        self.swatches: list[QLabel] = []
+        self.value_labels: list[QLabel] = []
+        for row, label in enumerate(("输入（命中缓存）", "输入（未命中缓存）", "输出")):
+            swatch = QLabel()
+            swatch.setFixedSize(8, 8)
+            name_label = QLabel(label)
+            name_label.setObjectName("minuteTooltipMuted")
+            value_label = QLabel("0")
+            value_label.setObjectName("minuteTooltipValue")
+            value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            rows.addWidget(swatch, row, 0)
+            rows.addWidget(name_label, row, 1)
+            rows.addWidget(value_label, row, 2)
+            self.swatches.append(swatch)
+            self.value_labels.append(value_label)
+        layout.addLayout(rows)
+
+        divider = QFrame()
+        divider.setObjectName("divider")
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setFixedHeight(1)
+        layout.addWidget(divider)
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        rate_name = QLabel("缓存命中率")
+        rate_name.setObjectName("minuteTooltipMuted")
+        self.rate_label = QLabel("--")
+        self.rate_label.setObjectName("minuteTooltipValue")
+        footer.addWidget(rate_name)
+        footer.addStretch(1)
+        footer.addWidget(self.rate_label)
+        layout.addLayout(footer)
+        self.hide()
+
+    def set_values(self, minute: int, values: tuple[int, int, int]) -> None:
+        hit, miss, output = values
+        total = hit + miss + output
+        rate = "--" if hit + miss == 0 else f"{hit / (hit + miss) * 100:.1f}%"
+        self.time_label.setText(f"{minute // 60:02d}:{minute % 60:02d}")
+        self.total_label.setText(f"总计 {compact_tokens(total)}")
+        for label, value in zip(self.value_labels, values):
+            label.setText(compact_tokens(value))
+        self.rate_label.setText(rate)
+
+    def refresh_colors(self, colors: tuple[QColor, QColor, QColor]) -> None:
+        for swatch, color in zip(self.swatches, colors):
+            swatch.setStyleSheet(f"background: {color.name()}; border-radius: 2px;")
+
+
 class MinuteUsageChart(QWidget):
     """当天 Token 差额的估算分时图；原始分钟数据始终保持不变。"""
+
+    SPARSE_POINT_LIMIT = 24
+    DEFAULT_VISIBLE_MINUTES = 24
+    BAR_MIN_WIDTH_PX = 3.0
+    BAR_MAX_WIDTH_PX = 36.0
 
     SERIES = (
         ("PROMPT_CACHE_HIT_TOKEN", "输入（命中缓存）"),
@@ -355,10 +438,16 @@ class MinuteUsageChart(QWidget):
         self._visible = {key: True for key, _label in self.SERIES}
         self._signature: tuple | None = None
         self._updating_region = False
-        self._fills: dict[str, pg.FillBetweenItem] = {}
-        self._curves: dict[str, pg.PlotDataItem] = {}
-        self._total_curve: pg.PlotDataItem | None = None
-        self._nav_curve: pg.PlotDataItem | None = None
+        self._bars: dict[str, pg.BarGraphItem] = {}
+        self._bar_width = 0.8
+        self._nav_bars: pg.BarGraphItem | None = None
+        self._hover_line: pg.InfiniteLine | None = None
+        self._hover_bar: pg.BarGraphItem | None = None
+        self._nav_handles: pg.ScatterPlotItem | None = None
+        self._has_initial_range = False
+        self._sparse_mode = False
+        self._active_minutes: list[int] = []
+        self._x_bounds = (-0.5, 1439.5)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -378,20 +467,22 @@ class MinuteUsageChart(QWidget):
         self.plot.hideButtons()
         self.plot.setMenuEnabled(False)
         self.plot.showGrid(x=False, y=True, alpha=0.14)
-        self.plot.setMinimumHeight(82)
-        self.plot.getViewBox().setLimits(xMin=0, xMax=1439, yMin=0)
+        self.plot.setMinimumHeight(118)
+        self.plot.getViewBox().setLimits(
+            xMin=-0.5, xMax=1439.5, yMin=0, minXRange=1, maxXRange=1440
+        )
         self.plot.getAxis("left").setWidth(42)
         self.plot.getAxis("left").setTickFont(QFont("Microsoft YaHei UI", 8))
         self.plot.getAxis("bottom").setHeight(18)
         self.plot.getAxis("bottom").setTickFont(QFont("Microsoft YaHei UI", 8))
         self.plot.getAxis("bottom").setTicks(
-            [[(minute, f"{minute // 60:02d}:00") for minute in range(0, 1440, 240)]]
+            [[(minute, f"{minute // 60:02d}:00") for minute in range(0, 1441, 60)]]
         )
         chart_layout.addWidget(self.plot, 1)
 
         self.navigator = pg.PlotWidget()
         self.navigator.setStyleSheet("border: 0;")
-        self.navigator.setFixedHeight(25)
+        self.navigator.setFixedHeight(34)
         self.navigator.setMouseEnabled(x=False, y=False)
         self.navigator.hideButtons()
         self.navigator.setMenuEnabled(False)
@@ -399,15 +490,16 @@ class MinuteUsageChart(QWidget):
         self.navigator.getAxis("bottom").setHeight(15)
         self.navigator.getAxis("bottom").setTickFont(QFont("Microsoft YaHei UI", 7))
         self.navigator.getAxis("bottom").setTicks(
-            [[(minute, f"{minute // 60:02d}:00") for minute in range(0, 1441, 360)]]
+            [[(minute, f"{minute // 60:02d}:00") for minute in range(0, 1441, 240)]]
         )
-        self.navigator.getViewBox().setLimits(xMin=0, xMax=1439, yMin=0)
-        self.region = pg.LinearRegionItem(values=(0, 1439), movable=True)
+        self.navigator.getViewBox().setLimits(xMin=-0.5, xMax=1439.5, yMin=0)
+        self.region = pg.LinearRegionItem(values=(720, 960), movable=True)
         self.region.sigRegionChanged.connect(self._on_region_changed)
         self.navigator.addItem(self.region)
         chart_layout.addWidget(self.navigator)
         layout.addWidget(self.chart_container, 1)
         self.chart_container.hide()
+        self.hover_tooltip = MinuteUsageTooltip(self.plot)
         self._mouse_proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved, rateLimit=60, slot=self._on_mouse_moved
         )
@@ -420,9 +512,9 @@ class MinuteUsageChart(QWidget):
     @staticmethod
     def _colors() -> tuple[QColor, QColor, QColor]:
         tokens = current_theme()
-        hit = QColor(tokens.accent).lighter(155)
+        hit = QColor(tokens.accent).lighter(145)
         miss = QColor(tokens.accent)
-        output = QColor(tokens.accent).darker(135)
+        output = QColor(tokens.accent).darker(130)
         return hit, miss, output
 
     def legend_color(self, token_type: str) -> QColor:
@@ -457,7 +549,7 @@ class MinuteUsageChart(QWidget):
             self._show_state("分时数据暂不可用，请刷新后重试")
             return
         if not any(sum(values[key]) for key, _label in self.SERIES):
-            self._show_state("今日暂无已收集的 Token 分时数据")
+            self._show_state("今日暂无 Token 消耗")
             return
         self.state_label.hide()
         self.chart_container.show()
@@ -466,6 +558,7 @@ class MinuteUsageChart(QWidget):
             self._render_series()
 
     def _show_state(self, message: str) -> None:
+        self._hide_hover()
         self.state_label.setText(message)
         self.state_label.show()
         self.chart_container.hide()
@@ -475,37 +568,94 @@ class MinuteUsageChart(QWidget):
         hit = self._values["PROMPT_CACHE_HIT_TOKEN"]
         miss = self._values["PROMPT_CACHE_MISS_TOKEN"]
         output = self._values["RESPONSE_TOKEN"]
-        cumulative = [hit[index] + miss[index] for index in x]
-        total = [cumulative[index] + output[index] for index in x]
+        total = [output[index] + miss[index] + hit[index] for index in x]
+        active_minutes = [minute for minute, amount in enumerate(total) if amount > 0]
+        self._active_minutes = active_minutes
+        self._sparse_mode = len(active_minutes) <= self.SPARSE_POINT_LIMIT
         self.plot.clear()
         self.navigator.clear()
-        self._fills = {}
-        self._curves = {}
-        zero_curve = pg.PlotDataItem(x, [0] * 1440, pen=None)
-        hit_curve = pg.PlotDataItem(x, hit)
-        miss_curve = pg.PlotDataItem(x, cumulative)
-        output_curve = pg.PlotDataItem(x, total)
-        curves = (hit_curve, miss_curve, output_curve)
-        previous = zero_curve
-        for (token_type, _label), curve in zip(self.SERIES, curves):
-            fill = pg.FillBetweenItem(previous, curve)
-            self.plot.addItem(fill)
-            self.plot.addItem(curve)
-            self._fills[token_type] = fill
-            self._curves[token_type] = curve
-            previous = curve
-        self._total_curve = pg.PlotDataItem(x, total)
-        self.plot.addItem(self._total_curve)
-        self._nav_curve = pg.PlotDataItem(x, total)
-        self.navigator.addItem(self._nav_curve)
+        self._bars = {}
+        for z_value, token_type in enumerate(
+            ("RESPONSE_TOKEN", "PROMPT_CACHE_MISS_TOKEN", "PROMPT_CACHE_HIT_TOKEN"),
+            start=2,
+        ):
+            bars = pg.BarGraphItem(x=x, y0=[0] * 1440, height=[0] * 1440, width=0.8)
+            bars.setZValue(z_value)
+            self.plot.addItem(bars)
+            self._bars[token_type] = bars
+        nav_x = active_minutes
+        self._nav_bars = pg.BarGraphItem(
+            x=nav_x,
+            height=[total[minute] for minute in nav_x],
+            width=1.0,
+            pen=None,
+        )
+        self._nav_bars.setZValue(2)
+        self.navigator.addItem(self._nav_bars)
+        self.region.setZValue(1)
         self.navigator.addItem(self.region)
+        self._nav_handles = pg.ScatterPlotItem(size=9, symbol="s")
+        self._nav_handles.setZValue(3)
+        self.navigator.addItem(self._nav_handles)
+        self._hover_line = pg.InfiniteLine(angle=90, movable=False)
+        self._hover_line.hide()
+        self.plot.addItem(self._hover_line)
+        self._hover_bar = pg.BarGraphItem(x=[0], height=[0], width=0.8)
+        self._hover_bar.setZValue(8)
+        self._hover_bar.hide()
+        self.plot.addItem(self._hover_bar)
         maximum = max(total, default=0)
         self.plot.setYRange(0, max(1, maximum * 1.08), padding=0)
         self.navigator.setYRange(0, max(1, maximum * 1.08), padding=0)
-        self.plot.setXRange(0, 1439, padding=0)
-        self.navigator.setXRange(0, 1439, padding=0)
+        self._apply_x_range(active_minutes)
+        self._has_initial_range = True
+        self._update_bar_width(*self.plot.getViewBox().viewRange()[0])
+        self._update_nav_handles()
         self.refresh_theme()
         self._apply_visibility()
+
+    def _apply_x_range(self, active_minutes: list[int]) -> None:
+        """主图按活跃分钟动态取景，导航条始终保留全天真实时间轴。"""
+        self._updating_region = True
+        try:
+            self._x_bounds = (-0.5, 1439.5)
+            self.plot.getViewBox().setLimits(
+                xMin=-0.5, xMax=1439.5, minXRange=1, maxXRange=1440
+            )
+            self.navigator.getViewBox().setLimits(xMin=-0.5, xMax=1439.5, minXRange=1)
+            self.region.setBounds(self._x_bounds)
+            self.navigator.setXRange(*self._x_bounds, padding=0)
+            self.navigator.getAxis("bottom").setTicks(
+                [[(minute, f"{minute // 60:02d}:00") for minute in range(0, 1441, 240)]]
+            )
+            first = active_minutes[0]
+            last = active_minutes[-1]
+            span = last - first + 1
+            if self._sparse_mode and span <= self.SPARSE_POINT_LIMIT:
+                low, high = first - 0.5, last + 0.5
+            else:
+                high = min(1439.5, last + 0.5)
+                low = max(-0.5, high - self.DEFAULT_VISIBLE_MINUTES)
+                high = min(1439.5, low + self.DEFAULT_VISIBLE_MINUTES)
+            self.region.setRegion((low, high))
+            self.plot.setXRange(low, high, padding=0)
+            self._update_main_ticks(low, high)
+        finally:
+            self._updating_region = False
+
+    def _update_main_ticks(self, low: float, high: float) -> None:
+        span = max(1.0, high - low)
+        step = next(
+            (candidate for candidate in (1, 2, 5, 10, 15, 30, 60, 120, 240) if span / candidate <= 8),
+            240,
+        )
+        first = max(0, int((low + step - 1) // step) * step)
+        last = min(1439, int(high))
+        ticks = [
+            (minute, f"{minute // 60:02d}:{minute % 60:02d}")
+            for minute in range(first, last + 1, step)
+        ]
+        self.plot.getAxis("bottom").setTicks([ticks])
 
     def refresh_theme(self) -> None:
         tokens = current_theme()
@@ -519,21 +669,34 @@ class MinuteUsageChart(QWidget):
                 axis.setPen(pg.mkPen(border))
         colors = self._colors()
         for ((token_type, _label), color) in zip(self.SERIES, colors):
-            fill = self._fills.get(token_type)
-            curve = self._curves.get(token_type)
-            if fill is not None:
+            bars = self._bars.get(token_type)
+            if bars is not None:
                 brush = QColor(color)
-                brush.setAlpha(118)
-                fill.setBrush(pg.mkBrush(brush))
-            if curve is not None:
-                curve.setPen(pg.mkPen(color, width=1.0))
-        if self._total_curve is not None:
-            self._total_curve.setPen(pg.mkPen(tokens.accent_hover, width=1.5))
-        if self._nav_curve is not None:
-            self._nav_curve.setPen(pg.mkPen(tokens.accent, width=0.9))
+                brush.setAlpha(232 if tokens.name == "dark" else 240)
+                border = QColor(color).darker(112)
+                border.setAlpha(230)
+                bars.setOpts(brush=pg.mkBrush(brush), pen=pg.mkPen(border, width=0.8))
+        if self._nav_bars is not None:
+            nav_brush = QColor(tokens.accent)
+            nav_brush.setAlpha(190)
+            self._nav_bars.setOpts(brush=pg.mkBrush(nav_brush), pen=None)
+        if self._nav_handles is not None:
+            self._nav_handles.setPen(pg.mkPen(tokens.accent_hover, width=1.0))
+            self._nav_handles.setBrush(pg.mkBrush(tokens.accent))
+        if self._hover_line is not None:
+            hover_pen = QColor(tokens.subtext)
+            hover_pen.setAlpha(150)
+            self._hover_line.setPen(pg.mkPen(hover_pen, width=1.0))
+        if self._hover_bar is not None:
+            hover_fill = QColor(tokens.accent_soft)
+            hover_fill.setAlpha(70)
+            self._hover_bar.setOpts(
+                brush=pg.mkBrush(hover_fill), pen=pg.mkPen(tokens.value, width=1.2)
+            )
         self.region.setBrush(pg.mkBrush(QColor(tokens.accent_soft)))
         for line in self.region.lines:
-            line.setPen(pg.mkPen(tokens.accent, width=1.0))
+            line.setPen(pg.mkPen(tokens.accent, width=1.4))
+        self.hover_tooltip.refresh_colors(colors)
 
     def set_series_visible(self, token_type: str, visible: bool) -> None:
         if token_type not in self._visible:
@@ -542,11 +705,22 @@ class MinuteUsageChart(QWidget):
         self._apply_visibility()
 
     def _apply_visibility(self) -> None:
-        for token_type, visible in self._visible.items():
-            if token_type in self._fills:
-                self._fills[token_type].setVisible(visible)
-            if token_type in self._curves:
-                self._curves[token_type].setVisible(visible)
+        x = list(range(1440))
+        baseline = [0] * 1440
+        for token_type in (
+            "RESPONSE_TOKEN",
+            "PROMPT_CACHE_MISS_TOKEN",
+            "PROMPT_CACHE_HIT_TOKEN",
+        ):
+            bars = self._bars.get(token_type)
+            if bars is None:
+                continue
+            visible = self._visible[token_type]
+            values = self._values[token_type]
+            bars.setOpts(x=x, y0=baseline, height=values, width=self._bar_width)
+            bars.setVisible(visible)
+            if visible:
+                baseline = [baseline[index] + values[index] for index in x]
 
     def _on_region_changed(self) -> None:
         if self._updating_region:
@@ -555,8 +729,19 @@ class MinuteUsageChart(QWidget):
         self._updating_region = True
         try:
             self.plot.setXRange(low, high, padding=0)
+            self._update_main_ticks(low, high)
+            self._update_bar_width(low, high)
+            self._update_nav_handles()
         finally:
             self._updating_region = False
+
+    def _update_nav_handles(self) -> None:
+        if self._nav_handles is None:
+            return
+        low, high = self.region.getRegion()
+        y_range = self.navigator.getViewBox().viewRange()[1]
+        center_y = (y_range[0] + y_range[1]) / 2
+        self._nav_handles.setData([low, high], [center_y, center_y])
 
     def _on_main_range_changed(self, _view_box, ranges) -> None:
         if self._updating_region:
@@ -565,27 +750,87 @@ class MinuteUsageChart(QWidget):
         low, high = x_range
         self._updating_region = True
         try:
-            self.region.setRegion((max(0, low), min(1439, high)))
+            bound_low, bound_high = self._x_bounds
+            low = max(bound_low, low)
+            high = min(bound_high, high)
+            self.region.setRegion((low, high))
+            self._update_main_ticks(low, high)
+            self._update_bar_width(low, high)
         finally:
             self._updating_region = False
+
+    def _update_bar_width(self, low: float, high: float) -> None:
+        view_width = max(1.0, self.plot.getViewBox().width())
+        units_per_pixel = max(1.0, high - low) / view_width
+        target_pixels = min(
+            self.BAR_MAX_WIDTH_PX,
+            max(self.BAR_MIN_WIDTH_PX, 0.7 / units_per_pixel),
+        )
+        self._bar_width = min(0.84, target_pixels * units_per_pixel)
+        for bars in self._bars.values():
+            bars.setOpts(width=self._bar_width)
+        if self._hover_bar is not None:
+            self._hover_bar.setOpts(width=self._bar_width)
 
     def _on_theme_changed(self, _mode: str, _resolved: str) -> None:
         self.refresh_theme()
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._bars:
+            self._update_bar_width(*self.plot.getViewBox().viewRange()[0])
+
     def _on_mouse_moved(self, event) -> None:
         scene_pos = event[0]
-        if not self.plot.sceneBoundingRect().contains(scene_pos):
-            QToolTip.hideText()
+        view_box = self.plot.getViewBox()
+        if not view_box.sceneBoundingRect().contains(scene_pos):
+            self._hide_hover()
             return
-        point = self.plot.getViewBox().mapSceneToView(scene_pos)
+        point = view_box.mapSceneToView(scene_pos)
         minute = int(round(point.x()))
-        if not 0 <= minute < 1440:
-            QToolTip.hideText()
+        total = (
+            sum(self._values[key][minute] for key, _label in self.SERIES)
+            if 0 <= minute < 1440
+            else 0
+        )
+        if (
+            not 0 <= minute < 1440
+            or abs(point.x() - minute) > self._bar_width / 2
+            or not 0 <= point.y() <= total
+        ):
+            self._hide_hover()
             return
         local = self.plot.mapFromScene(scene_pos)
-        QToolTip.showText(
-            self.plot.mapToGlobal(local), self.tooltip_text(minute), self.plot
-        )
+        self._show_hover(minute, local)
+
+    def _minute_at_x(self, value: float) -> int:
+        return max(0, min(1439, int(round(value))))
+
+    def _show_hover(self, minute: int, local: QPoint) -> None:
+        values = tuple(self._values[key][minute] for key, _label in self.SERIES)
+        total = sum(values)
+        if self._hover_line is not None:
+            self._hover_line.setPos(minute)
+            self._hover_line.show()
+        if self._hover_bar is not None:
+            self._hover_bar.setOpts(x=[minute], height=[total], width=self._bar_width)
+            self._hover_bar.show()
+        self.hover_tooltip.set_values(minute, values)
+        self.hover_tooltip.adjustSize()
+        x = local.x() + 10
+        if x + self.hover_tooltip.width() > self.plot.width() - 6:
+            x = local.x() - self.hover_tooltip.width() - 10
+        y = max(6, min(local.y() + 8, self.plot.height() - self.hover_tooltip.height() - 6))
+        self.hover_tooltip.move(max(6, x), y)
+        self.hover_tooltip.raise_()
+        self.hover_tooltip.show()
+
+    def _hide_hover(self) -> None:
+        self.hover_tooltip.hide()
+        if self._hover_line is not None:
+            self._hover_line.hide()
+        if self._hover_bar is not None:
+            self._hover_bar.hide()
 
     def tooltip_text(self, minute: int) -> str:
         hit = self._values["PROMPT_CACHE_HIT_TOKEN"][minute]
@@ -607,13 +852,13 @@ class MinuteUsageChart(QWidget):
         output = sum(self._values["RESPONSE_TOKEN"])
         total = hit + miss + output
         if not total:
-            return "暂无估算数据"
+            return "今日 0 · 缓存命中 -- · 峰值 --"
         peak = max(
             range(1440),
             key=lambda minute: sum(self._values[key][minute] for key, _label in self.SERIES),
         )
         rate = "--" if hit + miss == 0 else f"{hit / (hit + miss) * 100:.1f}%"
-        return f"今日 {compact_tokens(total)} · 命中 {rate} · 峰值 {peak // 60:02d}:{peak % 60:02d}"
+        return f"今日 {compact_tokens(total)} · 缓存命中 {rate} · 峰值 {peak // 60:02d}:{peak % 60:02d}"
 
 
 class StatisticsCard(QFrame):
@@ -645,7 +890,7 @@ class StatisticsCard(QFrame):
         layout.addWidget(title)
 
         columns = QHBoxLayout()
-        columns.setContentsMargins(10, 0, 10, 0)
+        columns.setContentsMargins(0, 0, 0, 0)
         columns.setSpacing(0)
         self._values: list[QLabel] = []
         self._names: list[QLabel] = []
@@ -783,7 +1028,7 @@ class MainPanel(QFrame):
         body = QWidget()
         body.setObjectName("panelRoot")
         content = QVBoxLayout(body)
-        content.setContentsMargins(0, 7, 0, 7)
+        content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(SECTION_SPACING)
 
         self.top_section = QFrame()
@@ -847,7 +1092,7 @@ class MainPanel(QFrame):
 
         activity_header = QHBoxLayout()
         activity_header.setContentsMargins(0, 0, 0, 0)
-        activity_header.setSpacing(8)
+        activity_header.setSpacing(5)
         activity_title = QLabel("Token 活动")
         activity_title.setObjectName("sectionTitle")
         self.activity_mode_group = QButtonGroup(self)
@@ -858,37 +1103,66 @@ class MainPanel(QFrame):
         self.activity_mode_group.addButton(self.minute_activity_button)
         self.annual_activity_button.clicked.connect(lambda: self._set_activity_view("annual"))
         self.minute_activity_button.clicked.connect(lambda: self._set_activity_view("minute"))
+        self.activity_mode_segment = QFrame()
+        self.activity_mode_segment.setObjectName("activityModeSegment")
+        mode_layout = QHBoxLayout(self.activity_mode_segment)
+        mode_layout.setContentsMargins(1, 1, 1, 1)
+        mode_layout.setSpacing(0)
+        mode_layout.addWidget(self.annual_activity_button)
+        mode_layout.addWidget(self.minute_activity_button)
+
         self.minute_previous_button = self._minute_date_button("‹", "前一天（仅缓存当天估算数据）")
         self.minute_date_label = QLabel("今天")
         self.minute_date_label.setObjectName("minuteDateLabel")
+        self.minute_date_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.minute_date_label.setMinimumWidth(70)
         self.minute_next_button = self._minute_date_button("›", "后一天不可选择")
         self.minute_previous_button.setEnabled(False)
         self.minute_next_button.setEnabled(False)
         self.minute_date_label.setToolTip("估算分时仅保存当天数据")
-        self.minute_controls: list[QWidget] = [
-            self.minute_previous_button,
-            self.minute_date_label,
-            self.minute_next_button,
-        ]
-        self.minute_estimate_label = QLabel("估算（按刷新间隔均摊）")
+        self.minute_date_segment = QFrame()
+        self.minute_date_segment.setObjectName("minuteDateSegment")
+        date_layout = QHBoxLayout(self.minute_date_segment)
+        date_layout.setContentsMargins(1, 1, 1, 1)
+        date_layout.setSpacing(0)
+        date_layout.addWidget(self.minute_previous_button)
+        date_layout.addWidget(self.minute_date_label)
+        date_layout.addWidget(self.minute_next_button)
+        self.minute_controls: list[QWidget] = [self.minute_date_segment]
+        self.minute_estimate_label = QLabel("估算")
         self.minute_estimate_label.setObjectName("muted")
-        self.minute_estimate_label.setToolTip("按两次成功刷新之间的累计 Token 差额均摊，非平台原始分钟明细")
+        estimate_tooltip = "按刷新间隔均摊：两次成功刷新之间的累计 Token 差额，非平台原始分钟明细"
+        self.minute_estimate_label.setToolTip(estimate_tooltip)
         self.activity_summary = QLabel("暂无 Token 活动")
-        self.activity_summary.setObjectName("muted")
+        self.activity_summary.setObjectName("activitySummary")
+        self.activity_summary.setMinimumWidth(200)
+        self.activity_summary.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.activity_summary.setToolTip(estimate_tooltip)
+        self._annual_activity_summary = "暂无 Token 活动"
+        self._activity_view = "annual"
         activity_header.addWidget(activity_title)
-        activity_header.addWidget(self.annual_activity_button)
-        activity_header.addWidget(self.minute_activity_button)
+        activity_header.addWidget(self.activity_mode_segment)
         for control in self.minute_controls:
             activity_header.addWidget(control)
             control.hide()
         activity_header.addWidget(self.minute_estimate_label)
         self.minute_estimate_label.hide()
-        activity_header.addStretch(1)
+        self.activity_header_spacer = QSpacerItem(
+            0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
+        activity_header.addSpacerItem(self.activity_header_spacer)
         self.minute_legend_buttons: dict[str, QToolButton] = {}
         legend_text = {
             "PROMPT_CACHE_HIT_TOKEN": "命中缓存",
             "PROMPT_CACHE_MISS_TOKEN": "未命中",
             "RESPONSE_TOKEN": "输出",
+        }
+        legend_width = {
+            "PROMPT_CACHE_HIT_TOKEN": 64,
+            "PROMPT_CACHE_MISS_TOKEN": 54,
+            "RESPONSE_TOKEN": 44,
         }
         for token_type, label in MinuteUsageChart.SERIES:
             button = QToolButton()
@@ -896,6 +1170,9 @@ class MainPanel(QFrame):
             button.setText(legend_text[token_type])
             button.setCheckable(True)
             button.setChecked(True)
+            button.setIconSize(QSize(7, 7))
+            button.setFixedWidth(legend_width[token_type])
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             button.setToolTip(f"显示/隐藏{label}（不改变原始估算数据）")
             button.clicked.connect(
                 lambda checked, value=token_type: self.minute_chart.set_series_visible(value, checked)
@@ -918,7 +1195,6 @@ class MainPanel(QFrame):
         self.activity_scroll.setWidget(self.activity)
         self.activity_scroll.setFixedHeight(self.activity.height())
         self.minute_chart = MinuteUsageChart()
-        self.minute_chart.setFixedHeight(self.activity_scroll.height())
         self.activity_stack = QStackedWidget()
         self.activity_stack.setObjectName("activityStack")
         self.activity_stack.addWidget(self.activity_scroll)
@@ -965,6 +1241,8 @@ class MainPanel(QFrame):
         super().resizeEvent(event)
         if hasattr(self, "activity"):
             self._fit_activity_heatmap()
+        if hasattr(self, "activity_summary"):
+            self._update_activity_header_visibility()
 
     def _fit_activity_heatmap(self) -> None:
         # At the supported 640 px minimum, the full 53-week calendar must stay
@@ -1001,23 +1279,42 @@ class MainPanel(QFrame):
 
     def _set_activity_view(self, view: str) -> None:
         minute_view = view == "minute"
+        self._activity_view = view
         self.activity_stack.setCurrentIndex(1 if minute_view else 0)
         self.annual_activity_button.setChecked(not minute_view)
         self.minute_activity_button.setChecked(minute_view)
-        self.activity_summary.setVisible(not minute_view)
         for control in self.minute_controls:
             control.setVisible(minute_view)
-        self.minute_estimate_label.setVisible(minute_view)
         for button in self.minute_legend_buttons.values():
             button.setVisible(minute_view)
+        self.activity_summary.setText(
+            self.minute_chart.summary_text()
+            if minute_view
+            else self._annual_activity_summary
+        )
+        self.activity_header_spacer.changeSize(
+            0,
+            0,
+            QSizePolicy.Policy.Minimum if minute_view else QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+        self.activity_card.layout().invalidate()
         self._refresh_minute_control_colors()
+        self._update_activity_header_visibility()
+
+    def _update_activity_header_visibility(self) -> None:
+        minute_view = self._activity_view == "minute"
+        self.activity_summary.setVisible(not minute_view or self.width() >= 775)
+        self.minute_estimate_label.setVisible(minute_view and self.width() < 775)
 
     def _refresh_minute_control_colors(self) -> None:
         if not hasattr(self, "minute_chart"):
             return
         for token_type, button in self.minute_legend_buttons.items():
-            color = self.minute_chart.legend_color(token_type).name()
-            button.setStyleSheet(f"color: {color};")
+            color = self.minute_chart.legend_color(token_type)
+            swatch = QPixmap(8, 8)
+            swatch.fill(color)
+            button.setIcon(QIcon(swatch))
 
     def _theme_button(self, icon_name: str, mode: str, tooltip: str) -> QToolButton:
         button = QToolButton()
@@ -1153,7 +1450,7 @@ class MainPanel(QFrame):
                 summary = f"数据始于 {first.isoformat()} · 共 {compact_tokens(total)}"
             else:
                 summary = f"过去 12 个月共使用 {compact_tokens(total)}"
-        self.activity_summary.setText(summary)
+        self._annual_activity_summary = summary
 
         minute_date = f"今天 {data.minute_usage_date[5:]}" if len(data.minute_usage_date) == 10 else "今天"
         minute_hint = {
@@ -1166,6 +1463,11 @@ class MainPanel(QFrame):
             data.minute_usage,
             data.minute_usage_status,
             loading=loading,
+        )
+        self.activity_summary.setText(
+            self.minute_chart.summary_text()
+            if self._activity_view == "minute"
+            else self._annual_activity_summary
         )
         for button in self.minute_legend_buttons.values():
             button.setEnabled(data.minute_usage_status != "unavailable")

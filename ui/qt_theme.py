@@ -229,6 +229,10 @@ QLabel#metricDetail, QLabel#muted, QLabel[tone="muted"] {{
     color: {tokens.subtext};
     font-size: 12px;
 }}
+QLabel#activitySummary {{
+    color: {tokens.subtext};
+    font-size: 10px;
+}}
 QLabel[tone="success"] {{ color: {tokens.success}; }}
 QLabel[tone="warning"] {{ color: {tokens.warning}; }}
 QLabel[tone="danger"] {{ color: {tokens.danger}; }}
@@ -296,18 +300,23 @@ QToolButton#themeButton[selected="true"] {{
     color: {tokens.value};
     background: {tokens.accent_soft};
 }}
+QFrame#activityModeSegment,
+QFrame#minuteDateSegment {{
+    background: {tokens.surface};
+    border: 1px solid {tokens.border};
+    border-radius: 6px;
+}}
 QToolButton#activityModeButton {{
     min-height: 24px;
     padding: 0 9px;
     color: {tokens.subtext};
     background: transparent;
-    border: 1px solid {tokens.border};
-    border-radius: 6px;
+    border: 0;
+    border-radius: 5px;
 }}
 QToolButton#activityModeButton:checked {{
     color: {tokens.value};
     background: {tokens.accent};
-    border-color: {tokens.accent};
 }}
 QToolButton#minuteDateButton {{
     min-width: 20px;
@@ -316,22 +325,39 @@ QToolButton#minuteDateButton {{
     max-height: 22px;
     padding: 0;
     background: transparent;
-    border: 1px solid {tokens.border};
-    border-radius: 5px;
+    border: 0;
 }}
+QLabel#minuteDateLabel {{ color: {tokens.text}; font-size: 11px; }}
 QToolButton#minuteLegendButton {{
     min-height: 22px;
-    padding: 0 4px;
+    padding: 0;
+    color: {tokens.subtext};
     background: transparent;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    font-size: 11px;
-}}
-QToolButton#minuteLegendButton:checked {{
-    border-color: {tokens.border};
+    border: 0;
+    font-size: 10px;
 }}
 QToolButton#minuteLegendButton:!checked {{
     color: {tokens.disabled};
+}}
+QFrame#minuteTooltip {{
+    color: {tokens.text};
+    background: {tokens.elevated};
+    border: 1px solid {tokens.border_hover};
+    border-radius: 6px;
+}}
+QLabel#minuteTooltipTitle,
+QLabel#minuteTooltipValue {{
+    color: {tokens.text};
+    background: transparent;
+    border: 0;
+    font-size: 11px;
+}}
+QLabel#minuteTooltipTitle {{ font-weight: 600; }}
+QLabel#minuteTooltipMuted {{
+    color: {tokens.subtext};
+    background: transparent;
+    border: 0;
+    font-size: 11px;
 }}
 QPushButton#primaryButton {{
     color: white;

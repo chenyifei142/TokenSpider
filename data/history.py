@@ -276,9 +276,17 @@ def _save_minute_snapshot(
         )
 
 
-def clear_expired_minute_usage(provider: str, current_day: date) -> None:
-    """删除指定提供商早于其当前自然日的临时分时缓存。"""
-    threshold = current_day.isoformat()
+def _minute_usage_retention_threshold(current_day: date, retention_days: int) -> str:
+    if retention_days < 1:
+        raise ValueError("分时数据保存天数至少为 1 天")
+    return (current_day - timedelta(days=retention_days - 1)).isoformat()
+
+
+def clear_expired_minute_usage(
+    provider: str, current_day: date, retention_days: int = 3
+) -> None:
+    """删除指定提供商超过保留天数的临时分时缓存。"""
+    threshold = _minute_usage_retention_threshold(current_day, retention_days)
     with _connect() as connection:
         connection.execute(
             "DELETE FROM minute_usage WHERE provider = ? AND usage_date < ?",
@@ -295,6 +303,7 @@ def save_estimated_minute_usage(
     usage_day: date,
     totals: dict[str, int],
     observed_at: datetime,
+    retention_days: int = 3,
 ) -> str:
     """保存一次按刷新间隔均摊的 Token 差额。
 
@@ -308,13 +317,14 @@ def save_estimated_minute_usage(
         for token_type in MINUTE_TOKEN_TYPES
     }
     with _connect() as connection:
+        threshold = _minute_usage_retention_threshold(usage_day, retention_days)
         connection.execute(
             "DELETE FROM minute_usage WHERE provider = ? AND usage_date < ?",
-            (provider, usage_date),
+            (provider, threshold),
         )
         connection.execute(
             "DELETE FROM minute_usage_snapshot WHERE provider = ? AND usage_date < ?",
-            (provider, usage_date),
+            (provider, threshold),
         )
         previous, previous_at = _snapshot_rows(connection, provider, usage_date)
         if previous_at is None:

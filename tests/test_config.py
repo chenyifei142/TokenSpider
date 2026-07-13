@@ -119,7 +119,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(state, {"data_dir": str(target.resolve())})
             self.assertNotIn("pending_data_dir", saved_state)
             self.assertEqual((target / "usage.db").read_bytes(), b"history")
-            self.assertEqual((source / "usage.db").read_bytes(), b"history")
+            self.assertFalse(source.exists())
 
     def test_startup_keeps_old_directory_when_migration_fails(self):
         temp_root = Path.cwd() / ".test-appdata" / "tmp"
@@ -169,6 +169,14 @@ class ConfigTests(unittest.TestCase):
                 config_manager.validate_data_dir_target(nested)
 
     def test_boolean_and_provider_values_are_validated(self):
+        self.assertEqual(
+            config_manager.validate_config({"MINUTE_USAGE_RETENTION_DAYS": 3})[
+                "MINUTE_USAGE_RETENTION_DAYS"
+            ],
+            3,
+        )
+        with self.assertRaisesRegex(ValueError, "不能小于"):
+            config_manager.validate_config({"MINUTE_USAGE_RETENTION_DAYS": 0})
         self.assertFalse(
             config_manager.validate_config({"EDGE_HIDE_ENABLED": "false"})[
                 "EDGE_HIDE_ENABLED"

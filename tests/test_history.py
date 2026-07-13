@@ -2,7 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -168,7 +168,7 @@ class HistoryTests(unittest.TestCase):
                 history.save_estimated_minute_usage(
                     "deepseek", current_day, current_totals, datetime(2026, 7, 13, 10, 1)
                 )
-                history.clear_expired_minute_usage("deepseek", current_day)
+                history.clear_expired_minute_usage("deepseek", current_day, 1)
                 self.assertEqual(history.minute_usage_for_day("deepseek", old_day), [])
                 self.assertTrue(history.minute_usage_for_day("deepseek", current_day))
                 self.assertEqual(history.recent_daily(30_000)[0]["tokens"], 12)
@@ -193,8 +193,37 @@ class HistoryTests(unittest.TestCase):
                 finally:
                     connection.close()
                 with self.assertRaises(sqlite3.DatabaseError):
-                    history.clear_expired_minute_usage("deepseek", current_day)
+                    history.clear_expired_minute_usage("deepseek", current_day, 1)
                 self.assertTrue(history.minute_usage_for_day("deepseek", old_day))
+
+    def test_minute_cleanup_keeps_configured_retention_days(self):
+        with tempfile.TemporaryDirectory(dir=self.temp_root()) as directory:
+            with patch.object(history, "DB_PATH", Path(directory) / "usage.db"):
+                current_day = date(2026, 7, 13)
+                expired_day = current_day - timedelta(days=3)
+                retained_day = current_day - timedelta(days=2)
+                totals = {token_type: 0 for token_type in history.MINUTE_TOKEN_TYPES}
+                for usage_day in (expired_day, retained_day):
+                    history.save_estimated_minute_usage(
+                        "deepseek",
+                        usage_day,
+                        totals,
+                        datetime.combine(usage_day, datetime.min.time()),
+                        retention_days=365,
+                    )
+                    totals["RESPONSE_TOKEN"] += 1
+                    history.save_estimated_minute_usage(
+                        "deepseek",
+                        usage_day,
+                        totals,
+                        datetime.combine(usage_day, datetime.min.time()) + timedelta(minutes=1),
+                        retention_days=365,
+                    )
+
+                history.clear_expired_minute_usage("deepseek", current_day, 3)
+
+                self.assertEqual(history.minute_usage_for_day("deepseek", expired_day), [])
+                self.assertTrue(history.minute_usage_for_day("deepseek", retained_day))
 
 
 if __name__ == "__main__":
