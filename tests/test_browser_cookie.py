@@ -59,6 +59,24 @@ def test_required_cookie_validation_rejects_expired_values():
     )
 
 
+def test_required_cookie_validation_rejects_unix_epoch_expiration():
+    cookies = [
+        {
+            "name": "api-platform_serviceToken",
+            "value": "token",
+            "domain": ".xiaomimimo.com",
+            "expires": 0,
+        }
+    ]
+
+    assert not browser_cookie.has_valid_required_cookies(
+        cookies,
+        allowed_domains=("xiaomimimo.com",),
+        cookie_names=("api-platform_serviceToken",),
+        now=1_000,
+    )
+
+
 def test_required_cookie_validation_requires_every_named_cookie():
     cookies = [
         {"name": "api-platform_serviceToken", "value": "token", "domain": ".xiaomimimo.com", "expires": -1},

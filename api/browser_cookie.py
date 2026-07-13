@@ -298,7 +298,7 @@ def _unexpired_cookies(
             expires_at = float(cookie.get("expires"))
         except (TypeError, ValueError):
             expires_at = -1
-        if expires_at > 0 and expires_at <= current_time:
+        if expires_at >= 0 and expires_at <= current_time:
             continue
         result.append(cookie)
     return result
