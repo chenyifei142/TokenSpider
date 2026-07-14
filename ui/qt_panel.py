@@ -37,7 +37,9 @@ PANEL_MAX_WIDTH = 820
 PANEL_HEIGHT = 550
 HEADER_HEIGHT = 42
 TOP_SECTION_HEIGHT = 160
+ANNUAL_ACTIVITY_SECTION_HEIGHT = 176
 ACTIVITY_SECTION_HEIGHT = 230
+ANNUAL_PANEL_HEIGHT = PANEL_HEIGHT - (ACTIVITY_SECTION_HEIGHT - ANNUAL_ACTIVITY_SECTION_HEIGHT)
 STATISTICS_SECTION_HEIGHT = 76
 STATUS_SECTION_HEIGHT = 40
 SECTION_SPACING = 0
@@ -949,12 +951,13 @@ class MainPanel(QFrame):
     refresh_requested = Signal()
     close_requested = Signal()
     theme_requested = Signal(str)
+    activity_height_changed = Signal(int)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("panelFrame")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setMinimumSize(PANEL_MIN_WIDTH, PANEL_HEIGHT)
+        self.setMinimumSize(PANEL_MIN_WIDTH, ANNUAL_PANEL_HEIGHT)
         self.setMaximumSize(PANEL_MAX_WIDTH, PANEL_HEIGHT)
         self._theme_mode = "dark"
         self._resolved_theme = current_theme().name
@@ -1095,6 +1098,10 @@ class MainPanel(QFrame):
         activity_header.setSpacing(5)
         activity_title = QLabel("Token 活动")
         activity_title.setObjectName("sectionTitle")
+        # 标题只占文本所需宽度，避免分时控件显示后被布局拉伸并把切换按钮推向右侧。
+        activity_title.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred
+        )
         self.activity_mode_group = QButtonGroup(self)
         self.activity_mode_group.setExclusive(True)
         self.annual_activity_button = self._activity_mode_button("年度活动", True)
@@ -1105,6 +1112,8 @@ class MainPanel(QFrame):
         self.minute_activity_button.clicked.connect(lambda: self._set_activity_view("minute"))
         self.activity_mode_segment = QFrame()
         self.activity_mode_segment.setObjectName("activityModeSegment")
+        # 分时头部控件较多，固定紧凑尺寸可避免切换后被布局压缩而产生位移。
+        self.activity_mode_segment.setFixedSize(148, 26)
         mode_layout = QHBoxLayout(self.activity_mode_segment)
         mode_layout.setContentsMargins(1, 1, 1, 1)
         mode_layout.setSpacing(0)
@@ -1193,7 +1202,10 @@ class MainPanel(QFrame):
         self.activity = TokenActivityHeatmap()
         self._fit_activity_heatmap()
         self.activity_scroll.setWidget(self.activity)
-        self.activity_scroll.setFixedHeight(self.activity.height())
+        # 年度页需要铺满与分时图共用的堆栈，避免固定高度后在底部露出一块背景。
+        self.activity_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self.minute_chart = MinuteUsageChart()
         self.activity_stack = QStackedWidget()
         self.activity_stack.setObjectName("activityStack")
@@ -1266,6 +1278,7 @@ class MainPanel(QFrame):
         button.setCheckable(True)
         button.setChecked(checked)
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        button.setFixedSize(72, 22)
         return button
 
     def _minute_date_button(self, text: str, tooltip: str) -> QToolButton:
@@ -1280,6 +1293,13 @@ class MainPanel(QFrame):
     def _set_activity_view(self, view: str) -> None:
         minute_view = view == "minute"
         self._activity_view = view
+        activity_height = (
+            ACTIVITY_SECTION_HEIGHT if minute_view else ANNUAL_ACTIVITY_SECTION_HEIGHT
+        )
+        panel_height = PANEL_HEIGHT if minute_view else ANNUAL_PANEL_HEIGHT
+        # 两种视图的内容高度不同；同步收紧面板可消除年度页底部占位，同时保留分时图空间。
+        self.activity_card.setFixedHeight(activity_height)
+        self.setFixedHeight(panel_height)
         self.activity_stack.setCurrentIndex(1 if minute_view else 0)
         self.annual_activity_button.setChecked(not minute_view)
         self.minute_activity_button.setChecked(minute_view)
@@ -1292,15 +1312,10 @@ class MainPanel(QFrame):
             if minute_view
             else self._annual_activity_summary
         )
-        self.activity_header_spacer.changeSize(
-            0,
-            0,
-            QSizePolicy.Policy.Minimum if minute_view else QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Minimum,
-        )
         self.activity_card.layout().invalidate()
         self._refresh_minute_control_colors()
         self._update_activity_header_visibility()
+        self.activity_height_changed.emit(panel_height)
 
     def _update_activity_header_visibility(self) -> None:
         minute_view = self._activity_view == "minute"

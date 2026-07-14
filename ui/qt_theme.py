@@ -307,16 +307,20 @@ QFrame#minuteDateSegment {{
     border-radius: 6px;
 }}
 QToolButton#activityModeButton {{
-    min-height: 24px;
-    padding: 0 9px;
+    min-width: 72px;
+    max-width: 72px;
+    min-height: 22px;
+    max-height: 22px;
+    padding: 0;
     color: {tokens.subtext};
     background: transparent;
     border: 0;
     border-radius: 5px;
+    font-size: 11px;
 }}
 QToolButton#activityModeButton:checked {{
-    color: {tokens.value};
-    background: {tokens.accent};
+    color: #FFFFFF;
+    background: #2076FA;
 }}
 QToolButton#minuteDateButton {{
     min-width: 20px;

@@ -48,6 +48,14 @@ def test_theme_tokens_meet_readability_and_focus_contrast():
         assert len(tokens.heat) == 6
 
 
+def test_activity_selected_mode_uses_the_specified_blue_and_white_text():
+    style = build_app_style(LIGHT_THEME)
+    checked_rule = style.split("QToolButton#activityModeButton:checked", 1)[1].split("}", 1)[0]
+
+    assert "color: #FFFFFF;" in checked_rule
+    assert "background: #2076FA;" in checked_rule
+
+
 def test_context_menu_palette_tracks_light_and_dark_theme():
     menu = QMenu()
     menu.addAction("显示/隐藏")

@@ -228,6 +228,7 @@ class FloatingWidget(QWidget):
         self.panel.close_requested.connect(self.collapse_panel)
         if hasattr(self.panel, "theme_requested"):
             self.panel.theme_requested.connect(self._request_theme_change)
+        self.panel.activity_height_changed.connect(self._resize_expanded_panel)
 
     @Slot(str)
     def _request_theme_change(self, mode: str) -> None:
@@ -281,11 +282,17 @@ class FloatingWidget(QWidget):
         configured = int(config_manager.get("WIDGET_COMPACT_SIZE", DEF_BALL_SIZE))
         return DEF_BALL_SIZE if configured < DEF_BALL_SIZE else min(124, configured)
 
-    @staticmethod
-    def _expanded_size() -> tuple[int, int]:
+    def _expanded_size(self) -> tuple[int, int]:
         size = config_manager.get("WIDGET_EXPANDED_SIZE", (DEF_PANEL_W, DEF_PANEL_H))
         width = max(640, min(DEF_PANEL_W, int(size[0])))
-        return width, DEF_PANEL_H
+        return width, self.panel.height()
+
+    def _resize_expanded_panel(self, height: int) -> None:
+        if not self._expanded:
+            return
+        # 视图切换发生在展开态；外层窗口必须同步尺寸，否则缩短的面板会在底部留下透明占位。
+        self.setFixedHeight(height)
+        self._clamp_to_work_area()
 
     def _show_compact_at_saved_position(self) -> None:
         size = self._compact_size()

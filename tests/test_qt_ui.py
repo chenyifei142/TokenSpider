@@ -8,7 +8,7 @@ os.environ["APPDATA"] = str(Path.cwd() / ".test-appdata")
 
 import pyqtgraph as pg
 import pytest
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QSize, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QScrollArea,
+    QSizePolicy,
     QToolButton,
     QWidget,
 )
@@ -26,6 +27,8 @@ from data.store import TokenData
 from ui.geometry import WorkArea
 from ui.qt_ball import FloatingUsageBall
 from ui.qt_panel import (
+    ANNUAL_ACTIVITY_SECTION_HEIGHT,
+    ANNUAL_PANEL_HEIGHT,
     ACTIVITY_SECTION_HEIGHT,
     HEADER_HEIGHT,
     PANEL_HEIGHT,
@@ -364,6 +367,7 @@ def test_statistics_show_cached_historical_total_with_scope_tooltip():
 
 def test_panel_uses_fixed_v3_layout_budget_and_fluent_actions():
     panel = MainPanel()
+    panel.minute_activity_button.click()
     panel.resize(820, 550)
     panel.update_data(sample_data())
     panel.show()
@@ -398,6 +402,8 @@ def test_panel_uses_fixed_v3_layout_budget_and_fluent_actions():
         for label in panel.statistics._names + panel.statistics._values
     )
     assert [button.width() for button in panel.minute_legend_buttons.values()] == [64, 54, 44]
+    assert panel.activity_mode_segment.size() == QSize(148, 26)
+    assert panel.annual_activity_button.size() == QSize(72, 22)
     assert panel.activity_summary.minimumWidth() == 200
     assert all(
         0 <= value.mapTo(panel.statistics, QPoint()).y()
@@ -412,6 +418,36 @@ def test_panel_uses_fixed_v3_layout_budget_and_fluent_actions():
     assert panel.dark_theme_button.size().width() == 24
     assert panel.light_theme_button.iconSize().width() == 14
     assert panel.theme_segment.height() == 30
+    panel.close()
+
+
+def test_activity_switch_keeps_compact_controls_stable_and_fills_annual_page():
+    panel = MainPanel()
+    panel.resize(PANEL_MAX_WIDTH, ANNUAL_PANEL_HEIGHT)
+    panel.update_data(sample_data())
+    panel.show()
+    APP.processEvents()
+
+    annual_segment_geometry = panel.activity_mode_segment.geometry()
+    panel.minute_activity_button.click()
+    APP.processEvents()
+    minute_segment_geometry = panel.activity_mode_segment.geometry()
+
+    assert minute_segment_geometry == annual_segment_geometry
+    assert (
+        panel.activity_header_spacer.sizePolicy().horizontalPolicy()
+        == QSizePolicy.Policy.Expanding
+    )
+    assert panel.height() == PANEL_HEIGHT
+    assert panel.activity_card.height() == ACTIVITY_SECTION_HEIGHT
+    assert panel.annual_activity_button.size() == QSize(72, 22)
+    assert panel.minute_activity_button.size() == QSize(72, 22)
+
+    panel.annual_activity_button.click()
+    APP.processEvents()
+    assert panel.height() == ANNUAL_PANEL_HEIGHT
+    assert panel.activity_card.height() == ANNUAL_ACTIVITY_SECTION_HEIGHT
+    assert panel.activity_scroll.height() == panel.activity_stack.height()
     panel.close()
 
 
@@ -542,7 +578,10 @@ def test_expanded_window_hides_ball_and_uses_compact_panel_size():
         assert widget.panel.isVisible()
         # 小屏幕/无头测试后端会把面板限制在当前工作区内。
         assert widget.width() <= 820
-        assert widget.height() == 550
+        assert widget.height() == ANNUAL_PANEL_HEIGHT
+        widget.panel.minute_activity_button.click()
+        APP.processEvents()
+        assert widget.height() == PANEL_HEIGHT
         assert widget.mask().isEmpty()
 
         widget.toggle()
