@@ -224,6 +224,148 @@ def test_minute_chart_tooltip_legend_and_navigator_preserve_raw_series():
     chart.close()
 
 
+def test_minute_chart_aggregates_configured_time_buckets_and_costs():
+    chart = MinuteUsageChart()
+    rows = [
+        {
+            "minute": 600,
+            "token_type": "PROMPT_CACHE_HIT_TOKEN",
+            "token_amount": 80,
+        },
+        {
+            "minute": 604,
+            "token_type": "PROMPT_CACHE_MISS_TOKEN",
+            "token_amount": 20,
+        },
+        {"minute": 604, "token_type": "RESPONSE_TOKEN", "token_amount": 10},
+        {"minute": 605, "token_type": "RESPONSE_TOKEN", "token_amount": 7},
+        {"minute": 1439, "token_type": "RESPONSE_TOKEN", "token_amount": 3},
+    ]
+    chart.set_rows(
+        rows,
+        "recorded",
+        cost_rows=[
+            {"minute": 600, "cost_cny": Decimal(".10")},
+            {"minute": 604, "cost_cny": Decimal(".14")},
+            {"minute": 605, "cost_cny": Decimal(".02")},
+            {"minute": 1439, "cost_cny": Decimal("0")},
+        ],
+        interval_minutes=5,
+    )
+
+    first_bucket = chart._bucket_index_for_minute(600)
+    next_bucket = chart._bucket_index_for_minute(605)
+    assert len(chart._bucket_starts) == 288
+    assert chart._bucket_centers[first_bucket] == 602
+    assert chart._values["PROMPT_CACHE_HIT_TOKEN"][first_bucket] == 80
+    assert chart._values["PROMPT_CACHE_MISS_TOKEN"][first_bucket] == 20
+    assert chart._values["RESPONSE_TOKEN"][first_bucket] == 10
+    assert chart._values["RESPONSE_TOKEN"][next_bucket] == 7
+    assert sum(sum(series) for series in chart._values.values()) == 120
+    assert "10:00–10:04　总计 110" in chart.tooltip_text(604)
+    assert "本时段消耗金额　¥0.24" in chart.tooltip_text(600)
+    assert "10:05–10:09　总计 7" in chart.tooltip_text(605)
+    assert "23:55–23:59" in chart.tooltip_text(1439)
+    assert "本时段消耗金额　¥0.00" in chart.tooltip_text(1439)
+    assert chart.summary_text().endswith("峰值 10:00–10:04")
+    assert chart._bars["RESPONSE_TOKEN"].opts["height"][first_bucket] == 10
+
+    chart._show_hover(604, QPoint(120, 50))
+    assert chart.hover_tooltip.time_label.text() == "10:00–10:04"
+    assert chart.hover_tooltip.cost_name.text() == "本时段消耗金额"
+    assert chart.hover_tooltip.cost_label.text() == "¥0.24"
+    chart.close()
+
+
+def test_minute_chart_arbitrary_interval_aligns_to_midnight_and_clips_last_bucket():
+    chart = MinuteUsageChart()
+    chart.set_rows(
+        [
+            {"minute": 59, "token_type": "RESPONSE_TOKEN", "token_amount": 2},
+            {"minute": 60, "token_type": "RESPONSE_TOKEN", "token_amount": 3},
+            {"minute": 1439, "token_type": "RESPONSE_TOKEN", "token_amount": 4},
+        ],
+        "recorded",
+        interval_minutes=7,
+    )
+
+    assert len(chart._bucket_starts) == 206
+    assert "00:56–01:02　总计 5" in chart.tooltip_text(59)
+    assert "00:56–01:02　总计 5" in chart.tooltip_text(60)
+    assert "23:55–23:59　总计 4" in chart.tooltip_text(1439)
+    with pytest.raises(ValueError, match="1 到 60"):
+        chart.set_rows([], "empty", interval_minutes=61)
+    chart.close()
+
+
+def test_minute_chart_switches_between_bar_and_line_rendering():
+    chart = MinuteUsageChart()
+    rows = [
+        {
+            "minute": 600,
+            "token_type": "PROMPT_CACHE_HIT_TOKEN",
+            "token_amount": 80,
+        },
+        {"minute": 604, "token_type": "RESPONSE_TOKEN", "token_amount": 10},
+        {"minute": 605, "token_type": "RESPONSE_TOKEN", "token_amount": 7},
+    ]
+    chart.set_rows(rows, "recorded", interval_minutes=5, chart_type="line")
+
+    assert not chart._bars
+    assert set(chart._lines) == {key for key, _label in chart.SERIES}
+    assert chart._nav_bars is None
+    assert chart._nav_line is not None
+    hit_line = chart._lines["PROMPT_CACHE_HIT_TOKEN"]
+    assert list(hit_line.xData) == [602, 607]
+    assert list(hit_line.yData) == [80, 0]
+    assert hit_line.opts["antialias"] is True
+    assert hit_line.opts["pen"].capStyle() == Qt.PenCapStyle.RoundCap
+    assert hit_line.opts["pen"].joinStyle() == Qt.PenJoinStyle.RoundJoin
+    assert chart._nav_line.opts["antialias"] is True
+    assert chart._nav_line.opts["pen"].capStyle() == Qt.PenCapStyle.RoundCap
+    assert list(chart._lines["RESPONSE_TOKEN"].yData) == [10, 7]
+    chart.set_series_visible("RESPONSE_TOKEN", False)
+    assert not chart._lines["RESPONSE_TOKEN"].isVisible()
+
+    chart._show_hover(600, QPoint(120, 50))
+    assert chart._hover_line.isVisible()
+    assert chart._hover_bar is None
+    assert chart.hover_tooltip.time_label.text() == "10:00–10:04"
+
+    chart.set_rows(rows, "recorded", interval_minutes=5, chart_type="bar")
+    assert chart._bars
+    assert not chart._lines
+    assert chart._nav_bars is not None
+    assert chart._nav_line is None
+    with pytest.raises(ValueError, match="bar 或 line"):
+        chart.set_rows([], "empty", chart_type="area")
+    chart.close()
+
+
+def test_minute_chart_default_range_shows_about_24_configured_buckets():
+    chart = MinuteUsageChart()
+    chart.resize(900, 180)
+    chart.set_rows(
+        [
+            {
+                "minute": 600 + index * 5,
+                "token_type": "RESPONSE_TOKEN",
+                "token_amount": 1,
+            }
+            for index in range(25)
+        ],
+        "recorded",
+        interval_minutes=5,
+    )
+    APP.processEvents()
+
+    assert not chart._sparse_mode
+    left, right = chart.plot.getViewBox().viewRange()[0]
+    assert right - left == pytest.approx(120)
+    assert chart._bar_width <= 4.2
+    chart.close()
+
+
 def test_minute_chart_uses_compact_range_for_up_to_24_nonzero_minutes():
     chart = MinuteUsageChart()
     chart.resize(900, 180)
@@ -482,7 +624,8 @@ def test_minute_date_selection_renders_history_and_refresh_keeps_user_choice():
         panel.update_data(data)
         panel.minute_previous_button.click()
         assert panel.minute_date_edit.date() == QDate(2026, 7, 13)
-        assert panel.minute_chart._values["RESPONSE_TOKEN"][10] == 10
+        bucket_index = panel.minute_chart._bucket_index_for_minute(10)
+        assert panel.minute_chart._values["RESPONSE_TOKEN"][bucket_index] == 10
 
         panel.update_data(data)
         assert panel.minute_date_edit.date() == QDate(2026, 7, 13)
@@ -1020,6 +1163,7 @@ def test_settings_exposes_panel_auto_collapse_toggle():
 def test_settings_exposes_minute_usage_retention_days():
     values = {
         **config_manager.all_config(),
+        "MINUTE_USAGE_CHART_TYPE": "line",
         "MINUTE_USAGE_RETENTION_DAYS": 7,
     }
     with (
@@ -1028,6 +1172,14 @@ def test_settings_exposes_minute_usage_retention_days():
     ):
         window = SettingsWindow()
 
+    assert window.minute_usage_interval_minutes.value() == 5
+    window.minute_usage_interval_minutes.setValue(15)
+    assert window._values()["MINUTE_USAGE_INTERVAL_MINUTES"] == 15
+    assert window.minute_usage_chart_type.currentData() == "line"
+    window.minute_usage_chart_type.setCurrentIndex(
+        window.minute_usage_chart_type.findData("bar")
+    )
+    assert window._values()["MINUTE_USAGE_CHART_TYPE"] == "bar"
     assert window.minute_usage_retention_days.value() == 7
     window.minute_usage_retention_days.setValue(14)
     assert window._values()["MINUTE_USAGE_RETENTION_DAYS"] == 14
