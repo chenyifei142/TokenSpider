@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app_identity import APP_STORAGE_NAME, SINGLE_INSTANCE_MUTEX
+from deepseek_pricing import configured_periods, parse_time_text
 
 APP_NAME = APP_STORAGE_NAME
 
@@ -39,6 +40,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "DEEPSEEK_AUTH": "",
     "DEEPSEEK_COOKIE": "",
     "DEEPSEEK_BASE": "https://platform.deepseek.com",
+    "DEEPSEEK_PEAK_PRICING_ENABLED": False,
+    "DEEPSEEK_PEAK_PERIOD_1_START": "09:00",
+    "DEEPSEEK_PEAK_PERIOD_1_END": "12:00",
+    "DEEPSEEK_PEAK_PERIOD_2_START": "14:00",
+    "DEEPSEEK_PEAK_PERIOD_2_END": "18:00",
     "MIMO_COOKIE": "",
     "MIMO_API_PLATFORM_PH": "",
     "MIMO_API_KEY": "",
@@ -63,6 +69,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
 FIELD_META: dict[str, dict[str, Any]] = {
     **{key: {"kind": "text", "secret": key in SECRET_KEYS} for key in DEFAULT_CONFIG},
     "REFRESH_INTERVAL": {"kind": "int", "min": 5_000},
+    "DEEPSEEK_PEAK_PRICING_ENABLED": {"kind": "bool"},
+    "DEEPSEEK_PEAK_PERIOD_1_START": {"kind": "time"},
+    "DEEPSEEK_PEAK_PERIOD_1_END": {"kind": "time"},
+    "DEEPSEEK_PEAK_PERIOD_2_START": {"kind": "time"},
+    "DEEPSEEK_PEAK_PERIOD_2_END": {"kind": "time"},
     "WIDGET_COMPACT_SIZE": {"kind": "int", "min": 88, "max": 124},
     "WIDGET_EXPANDED_SIZE": {"kind": "tuple_int"},
     "BG_COLOR": {"kind": "color"},
@@ -502,6 +513,9 @@ def validate_value(key: str, value: Any) -> Any:
             choices = ", ".join(meta["choices"])
             raise ValueError(f"{key} must be one of: {choices}")
         return normalized
+    if kind == "time":
+        parsed = parse_time_text(value)
+        return parsed.strftime("%H:%M")
     return str(value)
 
 
@@ -522,6 +536,7 @@ def validate_config(values: dict[str, Any]) -> dict[str, Any]:
     if update_channel not in {"stable", "prerelease"}:
         raise ValueError("UPDATE_CHANNEL must be stable or prerelease")
     merged["UPDATE_CHANNEL"] = update_channel
+    configured_periods(merged)
     # Provider 凭据会随请求发送，因此自定义地址至少必须是完整的 HTTP(S) URL；
     # 是否信任非官方主机由设置窗口在保存前再次向用户确认。
     for key in FIELD_META:

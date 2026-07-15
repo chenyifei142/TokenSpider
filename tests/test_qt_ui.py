@@ -9,7 +9,7 @@ os.environ["APPDATA"] = str(Path.cwd() / ".test-appdata")
 
 import pyqtgraph as pg
 import pytest
-from PySide6.QtCore import QDate, QEvent, QPoint, QPointF, QSize, Qt
+from PySide6.QtCore import QDate, QEvent, QPoint, QPointF, QSize, QTime, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -1293,6 +1293,77 @@ def test_settings_keep_unsaved_provider_drafts_when_switching():
         assert window._provider_widgets["AUTH"].text() == "draft-token"
         assert window._provider_widgets["AUTH"].echoMode() == QLineEdit.EchoMode.Password
         window.close()
+
+
+def test_settings_exposes_deepseek_peak_pricing_and_keeps_unsaved_times():
+    values = {
+        **config_manager.all_config(),
+        "ACTIVE_PROVIDER": "deepseek",
+        "DEEPSEEK_PEAK_PRICING_ENABLED": True,
+        "DEEPSEEK_PEAK_PERIOD_1_START": "09:00",
+        "DEEPSEEK_PEAK_PERIOD_1_END": "12:00",
+        "DEEPSEEK_PEAK_PERIOD_2_START": "14:00",
+        "DEEPSEEK_PEAK_PERIOD_2_END": "18:00",
+    }
+    with (
+        patch("ui.qt_settings.config_manager.load_config", return_value=values),
+        patch("ui.qt_settings.config_manager.all_config", return_value=values),
+    ):
+        window = SettingsWindow()
+        assert not window.deepseek_peak_pricing_card.isHidden()
+        assert window.deepseek_peak_period_1_start.isEnabled()
+        window.deepseek_peak_period_1_start.setTime(QTime(8, 30))
+
+        mimo_index = window.provider_combo.findData("mimo")
+        window.provider_combo.setCurrentIndex(mimo_index)
+        assert window.deepseek_peak_pricing_card.isHidden()
+        window.provider_combo.setCurrentIndex(window.provider_combo.findData("deepseek"))
+        assert not window.deepseek_peak_pricing_card.isHidden()
+        assert window.deepseek_peak_period_1_start.time().toString("HH:mm") == "08:30"
+
+        saved = window._values()
+        assert saved["DEEPSEEK_PEAK_PRICING_ENABLED"] is True
+        assert saved["DEEPSEEK_PEAK_PERIOD_1_START"] == "08:30"
+        window.deepseek_peak_pricing_enabled.setChecked(False)
+        assert not window.deepseek_peak_period_1_start.isEnabled()
+        assert window._values()["DEEPSEEK_PEAK_PRICING_ENABLED"] is False
+        window.close()
+
+
+def test_panel_badge_shows_peak_pricing_state():
+    panel = MainPanel()
+    tooltip = (
+        "峰时 2× · 12:00 结束\n北京时间高峰时段：09:00–12:00、14:00–18:00\n"
+        "高峰价适用所有计费项；本提示不参与账单计算。"
+    )
+    panel.set_pricing_state(True, True, "峰时 2× · 12:00 结束", tooltip)
+    assert not panel.pricing_badge.isHidden()
+    assert panel.pricing_badge.text() == "峰时 2× · 12:00 结束"
+    assert panel.pricing_badge.property("pricingState") == "peak"
+    assert panel.pricing_badge.toolTip() == tooltip
+
+    panel.set_pricing_state(False)
+    assert panel.pricing_badge.isHidden()
+    panel.close()
+
+
+def test_ball_peak_highlight_enhances_glow_without_pricing_text():
+    ball = FloatingUsageBall(88)
+    ball.set_values("¥4.31", "¥36.03")
+    ball.show()
+    APP.processEvents()
+    normal_ring = ball.grab().toImage().pixelColor(ball.width() // 2, 2)
+
+    ball.set_peak_highlight(True)
+    APP.processEvents()
+    peak_ring = ball.grab().toImage().pixelColor(ball.width() // 2, 2)
+
+    assert peak_ring != normal_ring
+    assert ball.toolTip() == ""
+    assert ball.accessibleName() == ""
+    assert (ball._today, ball._balance) == ("¥4.31", "¥36.03")
+    assert (ball.width(), ball.height()) == (88, 88)
+    ball.close()
 
 
 def test_settings_exposes_panel_auto_collapse_toggle():

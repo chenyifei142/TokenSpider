@@ -212,6 +212,20 @@ QTabBar::tab:selected {{
 QTabBar::tab:hover {{ color: {tokens.text}; }}
 QLabel#panelTitle {{ color: {tokens.value}; font-size: 17px; font-weight: 700; }}
 QLabel#panelSubtitle {{ color: {tokens.text}; font-size: 16px; font-weight: 400; }}
+QLabel#pricingBadge {{
+    color: {tokens.accent};
+    background: {tokens.accent_soft};
+    border: 1px solid {tokens.accent};
+    border-radius: 9px;
+    padding: 2px 7px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+QLabel#pricingBadge[pricingState="peak"] {{
+    color: {tokens.warning};
+    background: {tokens.surface};
+    border-color: {tokens.warning};
+}}
 QLabel#cardTitle, QLabel#metricLabel, QLabel#statLabel {{
     color: {tokens.subtext};
     font-size: 12px;

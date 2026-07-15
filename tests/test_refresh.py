@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -7,6 +8,7 @@ os.environ["APPDATA"] = str(Path.cwd() / ".test-appdata")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from data.store import FetchError, PerProviderData, TokenData
+from deepseek_pricing import BEIJING_TIMEZONE, PricingState
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 from ui.qt_panel import MainPanel
 from ui.qt_widget import FloatingWidget, MiMoRenewalTask
@@ -36,7 +38,81 @@ def widget_stub():
     return widget
 
 
+def pricing_widget_stub():
+    widget = FloatingWidget.__new__(FloatingWidget)
+    widget._pricing_state = None
+    widget._pricing_timer = Mock()
+    widget.panel = Mock()
+    widget.ball = Mock()
+    widget.tray = Mock()
+    return widget
+
+
 class RefreshTests(unittest.TestCase):
+    def test_peak_pricing_notifies_only_on_running_offpeak_to_peak_transition(self):
+        widget = pricing_widget_stub()
+        offpeak = PricingState(
+            False,
+            "平时 1× · 09:00 进入峰时",
+            "offpeak",
+            datetime(2026, 7, 15, 9, 0, tzinfo=BEIJING_TIMEZONE),
+        )
+        peak = PricingState(
+            True,
+            "峰时 2× · 12:00 结束",
+            "peak",
+            datetime(2026, 7, 15, 12, 0, tzinfo=BEIJING_TIMEZONE),
+        )
+        with (
+            patch("ui.qt_widget.config_manager.get") as get_config,
+            patch("ui.qt_widget.config_manager.all_config", return_value={}),
+            patch("ui.qt_widget.pricing_state", return_value=peak),
+        ):
+            get_config.side_effect = lambda key, default=None: {
+                "DEEPSEEK_PEAK_PRICING_ENABLED": True,
+                "ACTIVE_PROVIDER": "deepseek",
+            }.get(key, default)
+
+            # Startup or a config save renders the current state without notification.
+            widget._sync_pricing_state(notify_transition=False)
+            widget.tray.showMessage.assert_not_called()
+
+            widget._pricing_state = offpeak
+            widget._sync_pricing_state(notify_transition=True)
+            widget._sync_pricing_state(notify_transition=True)
+
+        widget.tray.showMessage.assert_called_once()
+        title, message, icon, timeout = widget.tray.showMessage.call_args.args
+        self.assertEqual(title, "TokenSpider：DeepSeek 已进入高峰计价")
+        self.assertIn("本时段至 12:00（北京时间）", message)
+        self.assertEqual(icon, QSystemTrayIcon.MessageIcon.Warning)
+        self.assertEqual(timeout, 10_000)
+        widget.panel.set_pricing_state.assert_called_with(
+            True, True, peak.label, peak.tooltip
+        )
+        widget.ball.set_peak_highlight.assert_called_with(True)
+
+    def test_peak_pricing_stops_and_clears_ui_when_disabled_or_provider_changes(self):
+        widget = pricing_widget_stub()
+        widget._pricing_state = PricingState(
+            True,
+            "peak",
+            "peak",
+            datetime(2026, 7, 15, 12, 0, tzinfo=BEIJING_TIMEZONE),
+        )
+        with patch("ui.qt_widget.config_manager.get") as get_config:
+            get_config.side_effect = lambda key, default=None: {
+                "DEEPSEEK_PEAK_PRICING_ENABLED": True,
+                "ACTIVE_PROVIDER": "mimo",
+            }.get(key, default)
+            widget._sync_pricing_state(notify_transition=True)
+
+        widget._pricing_timer.stop.assert_called_once()
+        self.assertIsNone(widget._pricing_state)
+        widget.panel.set_pricing_state.assert_called_once_with(False)
+        widget.ball.set_peak_highlight.assert_called_once_with(False)
+        widget.tray.showMessage.assert_not_called()
+
     def test_panel_and_ball_use_configured_refresh_interval(self):
         for provider, expanded in (("deepseek", False), ("mimo", False), ("deepseek", True)):
             widget = widget_stub()

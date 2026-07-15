@@ -6,6 +6,7 @@ import ctypes
 import sys
 import threading
 from ctypes import wintypes
+from datetime import datetime
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -24,6 +25,7 @@ from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QPalette, Q
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QMenu, QSystemTrayIcon, QWidget
 
 import config_manager
+from deepseek_pricing import BEIJING_TIMEZONE, PricingState, pricing_state
 from data.store import TokenData
 from api.providers.base import FetchError
 from api.providers.mimo import MiMoProvider
@@ -208,10 +210,13 @@ class FloatingWidget(QWidget):
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._periodic_refresh)
-        # Note: we no longer run a periodic "clock timer" that repaints
-        # the ball every 30 seconds. The UI is updated only when new
-        # data arrives from the provider, which saves significant idle
-        # CPU (painting a translucent anti-aliased circle is not free).
+        self._pricing_state: PricingState | None = None
+        self._pricing_timer = QTimer(self)
+        self._pricing_timer.setSingleShot(True)
+        self._pricing_timer.timeout.connect(self._on_pricing_boundary)
+        # Schedule exact boundaries so the panel and notifications stay current
+        # without adding an idle polling timer.
+        self._sync_pricing_state(notify_transition=False)
         self._show_compact_at_saved_position()
         self._update_controller.schedule_startup_check()
         self.refresh()
@@ -734,6 +739,7 @@ class FloatingWidget(QWidget):
 
     def _on_config_saved(self) -> None:
         config_manager.load_config()
+        self._sync_pricing_state(notify_transition=False)
         self._update_controller.reload_cached_release()
         self._update_controller.schedule_startup_check()
         self._reschedule_refresh()
@@ -884,6 +890,50 @@ class FloatingWidget(QWidget):
         self.refresh()
         self._reschedule_refresh()
 
+    def _on_pricing_boundary(self) -> None:
+        self._sync_pricing_state(notify_transition=True)
+
+    def _sync_pricing_state(self, notify_transition: bool) -> None:
+        enabled = bool(config_manager.get("DEEPSEEK_PEAK_PRICING_ENABLED", False)) and (
+            str(config_manager.get("ACTIVE_PROVIDER", "")).strip().lower() == "deepseek"
+        )
+        if not enabled:
+            self._pricing_timer.stop()
+            self._pricing_state = None
+            self.panel.set_pricing_state(False)
+            self.ball.set_peak_highlight(False)
+            return
+
+        previous = self._pricing_state
+        current = pricing_state(config_manager.all_config())
+        self._pricing_state = current
+        self.panel.set_pricing_state(
+            True, current.is_peak, current.label, current.tooltip
+        )
+        self.ball.set_peak_highlight(current.is_peak)
+        if (
+            notify_transition
+            and previous is not None
+            and not previous.is_peak
+            and current.is_peak
+            and self.tray is not None
+        ):
+            self.tray.showMessage(
+                "TokenSpider：DeepSeek 已进入高峰计价",
+                "当前所有计费项按平时价格 2 倍计费，"
+                f"本时段至 {current.next_boundary.strftime('%H:%M')}（北京时间）。",
+                QSystemTrayIcon.MessageIcon.Warning,
+                10_000,
+            )
+
+        # Add a small guard so an early timer wake-up cannot repeatedly classify
+        # the instant immediately before the half-open boundary.
+        now = datetime.now(BEIJING_TIMEZONE)
+        delay_ms = max(
+            1, int((current.next_boundary - now).total_seconds() * 1000) + 50
+        )
+        self._pricing_timer.start(delay_ms)
+
     def _uses_lightweight_mimo_refresh(self) -> bool:
         return (
             not self._expanded
@@ -933,6 +983,7 @@ class FloatingWidget(QWidget):
         config_manager.save_widget_position(x, y)
         self._closed = True
         self._refresh_timer.stop()
+        self._pricing_timer.stop()
         self._edge_animation.stop()
         self._edge_hide_timer.stop()
         self._edge_leave_timer.stop()

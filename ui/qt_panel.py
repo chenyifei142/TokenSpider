@@ -1611,9 +1611,17 @@ class MainPanel(QFrame):
         )
         self._provider_label = QLabel(f" · {provider_name}" if provider_name else "")
         self._provider_label.setObjectName("panelSubtitle")
+        self.pricing_badge = QLabel()
+        self.pricing_badge.setObjectName("pricingBadge")
+        self.pricing_badge.setProperty("pricingState", "offpeak")
+        self.pricing_badge.setWordWrap(True)
+        self.pricing_badge.setFixedWidth(176)
+        self.pricing_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pricing_badge.hide()
         header_layout.addWidget(logo)
         header_layout.addWidget(self._title_label)
         header_layout.addWidget(self._provider_label)
+        header_layout.addWidget(self.pricing_badge)
         header_layout.addStretch(1)
 
         self.theme_segment = QFrame()
@@ -2162,6 +2170,25 @@ class MainPanel(QFrame):
     def set_refreshing(self, refreshing: bool) -> None:
         self.refresh_button.setEnabled(not refreshing)
         self.refresh_button.setToolTip("刷新中" if refreshing else "刷新")
+
+    def set_pricing_state(
+        self, enabled: bool, is_peak: bool = False, label: str = "", tooltip: str = ""
+    ) -> None:
+        self.pricing_badge.setVisible(enabled)
+        if not enabled:
+            self.pricing_badge.setText("")
+            self.pricing_badge.setToolTip("")
+            self.pricing_badge.setAccessibleDescription("")
+            return
+        self.pricing_badge.setText(label)
+        self.pricing_badge.setToolTip(tooltip)
+        self.pricing_badge.setAccessibleName(label)
+        self.pricing_badge.setAccessibleDescription(tooltip.replace("\n", "；"))
+        self.pricing_badge.setProperty("pricingState", "peak" if is_peak else "offpeak")
+        # Dynamic Qt properties do not automatically trigger stylesheet rematching.
+        self.pricing_badge.style().unpolish(self.pricing_badge)
+        self.pricing_badge.style().polish(self.pricing_badge)
+        self.pricing_badge.update()
 
     def update_data(self, data: TokenData, loading: bool = False) -> None:
         money = lambda value: "--" if loading else format_money(value)

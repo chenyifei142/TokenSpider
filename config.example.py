@@ -8,6 +8,13 @@ DEEPSEEK_COOKIE = ""  # 填入你的 Cookie 字符串
 # API base URL
 DEEPSEEK_BASE = "https://platform.deepseek.com"
 
+# 可选：按北京时间显示 DeepSeek 峰谷计价状态，仅提示、不参与账单计算
+DEEPSEEK_PEAK_PRICING_ENABLED = False
+DEEPSEEK_PEAK_PERIOD_1_START = "09:00"
+DEEPSEEK_PEAK_PERIOD_1_END = "12:00"
+DEEPSEEK_PEAK_PERIOD_2_START = "14:00"
+DEEPSEEK_PEAK_PERIOD_2_END = "18:00"
+
 # 小米 MiMo 控制台凭据
 MIMO_COOKIE = ""  # 通常包含 serviceToken、userId、slh、ph
 MIMO_API_PLATFORM_PH = ""  # 兼容旧配置；完整 Cookie 已包含时留空

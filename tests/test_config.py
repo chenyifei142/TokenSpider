@@ -11,6 +11,40 @@ import config_manager
 
 
 class ConfigTests(unittest.TestCase):
+    def test_deepseek_peak_pricing_defaults_and_period_validation(self):
+        defaults = config_manager.validate_config({})
+        self.assertFalse(defaults["DEEPSEEK_PEAK_PRICING_ENABLED"])
+        self.assertEqual(defaults["DEEPSEEK_PEAK_PERIOD_1_START"], "09:00")
+        self.assertEqual(defaults["DEEPSEEK_PEAK_PERIOD_2_END"], "18:00")
+        enabled = config_manager.validate_config(
+            {"DEEPSEEK_PEAK_PRICING_ENABLED": "true"}
+        )
+        self.assertTrue(enabled["DEEPSEEK_PEAK_PRICING_ENABLED"])
+
+        with self.assertRaisesRegex(ValueError, "HH:mm"):
+            config_manager.validate_config({"DEEPSEEK_PEAK_PERIOD_1_START": "9:00"})
+        with self.assertRaisesRegex(ValueError, "开始时间必须早于结束时间"):
+            config_manager.validate_config(
+                {
+                    "DEEPSEEK_PEAK_PERIOD_1_START": "12:00",
+                    "DEEPSEEK_PEAK_PERIOD_1_END": "12:00",
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "不能重叠"):
+            config_manager.validate_config(
+                {
+                    "DEEPSEEK_PEAK_PERIOD_1_END": "14:01",
+                    "DEEPSEEK_PEAK_PERIOD_2_START": "14:00",
+                }
+            )
+        adjacent = config_manager.validate_config(
+            {
+                "DEEPSEEK_PEAK_PERIOD_1_END": "14:00",
+                "DEEPSEEK_PEAK_PERIOD_2_START": "14:00",
+            }
+        )
+        self.assertEqual(adjacent["DEEPSEEK_PEAK_PERIOD_2_START"], "14:00")
+
     def test_data_directory_migration_copies_all_entries_and_keeps_source(self):
         temp_root = Path.cwd() / ".test-appdata" / "tmp"
         temp_root.mkdir(parents=True, exist_ok=True)

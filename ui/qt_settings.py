@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Union
 
-from PySide6.QtCore import QSignalBlocker, QThread, QTimer, Signal
+from PySide6.QtCore import QSignalBlocker, QThread, QTime, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QTabWidget,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -159,6 +160,46 @@ class SettingsWindow(QDialog):
         content_layout.addWidget(title)
         content_layout.addLayout(picker_row)
         content_layout.addWidget(self.credentials_card)
+
+        self.deepseek_peak_pricing_card = QFrame()
+        self.deepseek_peak_pricing_card.setObjectName("settingsCard")
+        peak_layout = QVBoxLayout(self.deepseek_peak_pricing_card)
+        peak_layout.setContentsMargins(_CARD_PADDING, 14, _CARD_PADDING, 14)
+        peak_layout.setSpacing(9)
+        peak_title = QLabel("峰谷计价提示")
+        peak_title.setStyleSheet("font-size: 14px; font-weight: 600;")
+        peak_layout.addWidget(peak_title)
+        self.deepseek_peak_pricing_enabled = QCheckBox("显示峰谷计价状态")
+        self.deepseek_peak_pricing_enabled.toggled.connect(
+            self._set_peak_pricing_inputs_enabled
+        )
+        peak_layout.addWidget(self.deepseek_peak_pricing_enabled)
+        peak_form = QFormLayout()
+        peak_form.setHorizontalSpacing(16)
+        peak_form.setVerticalSpacing(8)
+        self.deepseek_peak_period_1_start = self._peak_time_edit()
+        self.deepseek_peak_period_1_end = self._peak_time_edit()
+        self.deepseek_peak_period_2_start = self._peak_time_edit()
+        self.deepseek_peak_period_2_end = self._peak_time_edit()
+        peak_form.addRow(
+            "高峰时段 1",
+            self._peak_period_row(
+                self.deepseek_peak_period_1_start, self.deepseek_peak_period_1_end
+            ),
+        )
+        peak_form.addRow(
+            "高峰时段 2",
+            self._peak_period_row(
+                self.deepseek_peak_period_2_start, self.deepseek_peak_period_2_end
+            ),
+        )
+        peak_layout.addLayout(peak_form)
+        peak_hint = QLabel("按北京时间判断；高峰时所有计费项按平时价格 2 倍计费。")
+        peak_hint.setWordWrap(True)
+        peak_hint.setProperty("tone", "muted")
+        peak_hint.setStyleSheet("font-size: 12px;")
+        peak_layout.addWidget(peak_hint)
+        content_layout.addWidget(self.deepseek_peak_pricing_card)
         content_layout.addLayout(connection_actions)
         content_layout.addWidget(self.connection_feedback)
         content_layout.addStretch(1)
@@ -340,6 +381,35 @@ class SettingsWindow(QDialog):
         self._remember_visible_credentials()
         provider_id = self.provider_combo.currentData()
         self._render_credentials(provider_id)
+
+    @staticmethod
+    def _peak_time_edit() -> QTimeEdit:
+        editor = QTimeEdit()
+        editor.setDisplayFormat("HH:mm")
+        editor.setTime(QTime(0, 0))
+        editor.setFixedWidth(92)
+        return editor
+
+    @staticmethod
+    def _peak_period_row(start: QTimeEdit, end: QTimeEdit) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(start)
+        layout.addWidget(QLabel("至"))
+        layout.addWidget(end)
+        layout.addStretch(1)
+        return row
+
+    def _set_peak_pricing_inputs_enabled(self, enabled: bool) -> None:
+        for editor in (
+            self.deepseek_peak_period_1_start,
+            self.deepseek_peak_period_1_end,
+            self.deepseek_peak_period_2_start,
+            self.deepseek_peak_period_2_end,
+        ):
+            editor.setEnabled(enabled)
 
     def _on_theme_changed(self, _index: int) -> None:
         mode = str(self.theme_combo.currentData() or "dark")
@@ -587,6 +657,7 @@ class SettingsWindow(QDialog):
                         else:
                             ph_widget.setText(ph_in_cookie)
         self._rendered_provider_id = provider_id
+        self.deepseek_peak_pricing_card.setVisible(provider_id == "deepseek")
         self._sync_window_size()
 
     def _add_cookie_acquire_row(self, provider_name: str) -> None:
@@ -654,6 +725,38 @@ class SettingsWindow(QDialog):
         self.panel_auto_collapse_check.setChecked(
             bool(values.get("PANEL_AUTO_COLLAPSE_ON_DEACTIVATE", True))
         )
+        self.deepseek_peak_pricing_enabled.setChecked(
+            bool(values.get("DEEPSEEK_PEAK_PRICING_ENABLED", False))
+        )
+        for editor, key, fallback in (
+            (
+                self.deepseek_peak_period_1_start,
+                "DEEPSEEK_PEAK_PERIOD_1_START",
+                "09:00",
+            ),
+            (
+                self.deepseek_peak_period_1_end,
+                "DEEPSEEK_PEAK_PERIOD_1_END",
+                "12:00",
+            ),
+            (
+                self.deepseek_peak_period_2_start,
+                "DEEPSEEK_PEAK_PERIOD_2_START",
+                "14:00",
+            ),
+            (
+                self.deepseek_peak_period_2_end,
+                "DEEPSEEK_PEAK_PERIOD_2_END",
+                "18:00",
+            ),
+        ):
+            parsed = QTime.fromString(str(values.get(key, fallback)), "HH:mm")
+            editor.setTime(
+                parsed if parsed.isValid() else QTime.fromString(fallback, "HH:mm")
+            )
+        self._set_peak_pricing_inputs_enabled(
+            self.deepseek_peak_pricing_enabled.isChecked()
+        )
         selected_data_dir = config_manager.pending_data_dir() or config_manager.CONFIG_DIR
         self._selected_data_dir = selected_data_dir
         self.data_dir_edit.setText(str(selected_data_dir))
@@ -700,6 +803,19 @@ class SettingsWindow(QDialog):
             "PANEL_AUTO_COLLAPSE_ON_DEACTIVATE": self.panel_auto_collapse_check.isChecked(),
             "UPDATE_AUTO_CHECK_ENABLED": self.auto_check_updates.isChecked(),
             "UPDATE_CHANNEL": str(self.update_channel_combo.currentData() or "stable"),
+            "DEEPSEEK_PEAK_PRICING_ENABLED": self.deepseek_peak_pricing_enabled.isChecked(),
+            "DEEPSEEK_PEAK_PERIOD_1_START": self.deepseek_peak_period_1_start.time().toString(
+                "HH:mm"
+            ),
+            "DEEPSEEK_PEAK_PERIOD_1_END": self.deepseek_peak_period_1_end.time().toString(
+                "HH:mm"
+            ),
+            "DEEPSEEK_PEAK_PERIOD_2_START": self.deepseek_peak_period_2_start.time().toString(
+                "HH:mm"
+            ),
+            "DEEPSEEK_PEAK_PERIOD_2_END": self.deepseek_peak_period_2_end.time().toString(
+                "HH:mm"
+            ),
         }
         # Persist credentials for all registered providers. The currently
         # selected provider is read from the on-screen inputs; other
