@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from collections.abc import Mapping
 from typing import Any
 
 import requests
@@ -85,13 +86,21 @@ class Provider:
     supports_cookie_acquisition = False
     credential_fields: dict[str, dict[str, Any]] = {}
 
-    def is_configured(self) -> bool:
+    def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+        self._config = config
+
+    def config_get(self, key: str, default: Any = None) -> Any:
+        if self._config is not None:
+            return self._config.get(key, default)
         import config_manager
 
+        return config_manager.get(key, default)
+
+    def is_configured(self) -> bool:
         for field, meta in self.credential_fields.items():
             if field == "BASE" or meta.get("optional"):
                 continue
-            if str(config_manager.get(f"{self.id.upper()}_{field}", "")).strip():
+            if str(self.config_get(f"{self.id.upper()}_{field}", "")).strip():
                 return True
         return False
 

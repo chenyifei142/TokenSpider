@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 import threading
+from collections.abc import Mapping
 from typing import Any
 
 import api.deepseek as platform_api
@@ -132,9 +133,14 @@ class DeepSeekProvider(Provider):
         },
     }
 
-    def __init__(self) -> None:
+    def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+        super().__init__(config)
         self._summary_cache: dict[str, Any] | None = None
         self._summary_error: Exception | None = None
+        # A settings test gets dedicated sessions so response cookies and adapter
+        # state cannot be shared with a concurrent background refresh.
+        self._platform_session = platform_api.build_session() if config is not None else None
+        self._official_session = official_api.build_session() if config is not None else None
 
     @staticmethod
     def acquired_cookie_values(cookie: str) -> dict[str, str]:
@@ -174,20 +180,26 @@ class DeepSeekProvider(Provider):
 
     def _has_platform_credentials(self) -> bool:
         return bool(
-            str(config_manager.get("DEEPSEEK_AUTH", "")).strip()
-            or str(config_manager.get("DEEPSEEK_COOKIE", "")).strip()
+            str(self.config_get("DEEPSEEK_AUTH", "")).strip()
+            or str(self.config_get("DEEPSEEK_COOKIE", "")).strip()
         )
 
     def is_configured(self) -> bool:
         return self._has_platform_credentials() or bool(
-            str(config_manager.get("DEEPSEEK_API_KEY", "")).strip()
+            str(self.config_get("DEEPSEEK_API_KEY", "")).strip()
         )
 
     def _summary(self) -> dict[str, Any]:
         # 同一轮余额和摘要共用一次平台请求，避免无 API Key 时重复拉取摘要。
         if self._summary_cache is None and self._summary_error is None:
             try:
-                self._summary_cache = platform_api.get_user_summary()
+                self._summary_cache = (
+                    platform_api.get_user_summary(
+                        self._config, session=self._platform_session
+                    )
+                    if self._config is not None
+                    else platform_api.get_user_summary()
+                )
             except Exception as exc:
                 self._summary_error = exc
         if self._summary_error is not None:
@@ -195,9 +207,15 @@ class DeepSeekProvider(Provider):
         return self._summary_cache or {}
 
     def fetch_balance(self) -> tuple[ProviderBalance | None, FetchError | None]:
-        if str(config_manager.get("DEEPSEEK_API_KEY", "")).strip():
+        if str(self.config_get("DEEPSEEK_API_KEY", "")).strip():
             try:
-                payload = official_api.get_balance()
+                payload = (
+                    official_api.get_balance(
+                        self._config, session=self._official_session
+                    )
+                    if self._config is not None
+                    else official_api.get_balance()
+                )
                 infos = payload.get("balance_infos", [])
                 if not isinstance(infos, list):
                     raise ValueError("balance_infos 字段不是列表")
@@ -257,11 +275,23 @@ class DeepSeekProvider(Provider):
             amount_data: dict[str, Any] | None = None
             cost_data: dict[str, Any] | None = None
             try:
-                amount_data = platform_api.get_usage_amount(month, year)
+                amount_data = (
+                    platform_api.get_usage_amount(
+                        month, year, self._config, session=self._platform_session
+                    )
+                    if self._config is not None
+                    else platform_api.get_usage_amount(month, year)
+                )
             except Exception as exc:
                 errors.append(_fetch_error("Token 明细", exc))
             try:
-                cost_data = platform_api.get_usage_cost(month, year)
+                cost_data = (
+                    platform_api.get_usage_cost(
+                        month, year, self._config, session=self._platform_session
+                    )
+                    if self._config is not None
+                    else platform_api.get_usage_cost(month, year)
+                )
             except Exception as exc:
                 errors.append(_fetch_error("费用明细", exc))
             if amount_data is None and cost_data is None:

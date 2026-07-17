@@ -7,6 +7,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from collections.abc import Mapping
 from typing import Any, ClassVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -317,6 +318,65 @@ class TokenData:
     _last_snapshot: ClassVar["TokenData | None"] = None
     _provider_snapshots: ClassVar[dict[str, "TokenData"]] = {}
     _cache_lock: ClassVar[threading.Lock] = threading.Lock()
+
+    @classmethod
+    def test_connection(cls, config: Mapping[str, Any]) -> "TokenData":
+        """Test one provider from an isolated configuration snapshot.
+
+        The test deliberately avoids history and snapshot writes so a settings draft
+        cannot affect the normal refresh path even when both operations overlap.
+        """
+        providers = list(active_providers(config))
+        if not providers:
+            return cls(
+                status="error",
+                errors=[FetchError("NOT_CONFIGURED", "平台", "没有可用的数据平台")],
+                last_attempt_at=datetime.now(),
+            )
+        provider = providers[0]
+        per = PerProviderData(provider.id, provider.name, status="loading")
+        successes = 0
+        if not provider.is_configured():
+            per.status = "not_configured"
+            per.errors.append(
+                FetchError("NOT_CONFIGURED", provider.name, f"尚未配置 {provider.name} 凭据")
+            )
+        else:
+            for source, fetcher in (
+                ("账户余额", provider.fetch_balance),
+                ("账户摘要", provider.fetch_summary),
+            ):
+                try:
+                    value, error = fetcher()
+                except Exception as exc:
+                    config_manager.logger().exception(
+                        "Connection test failed for %s: %s", provider.id, source
+                    )
+                    value, error = None, FetchError("UNKNOWN_ERROR", source, str(exc))
+                if value is not None:
+                    successes += 1
+                if error:
+                    per.errors.append(error)
+            try:
+                payloads, errors = provider.fetch_payloads(
+                    months_for_week(provider_usage_day(provider.id, datetime.now().astimezone()))
+                )
+            except Exception as exc:
+                config_manager.logger().exception(
+                    "Connection test payload fetch failed for %s", provider.id
+                )
+                payloads, errors = [], [FetchError("UNKNOWN_ERROR", "用量明细", str(exc))]
+            if payloads:
+                successes += 1
+            per.errors.extend(errors)
+            per.status = "partial" if successes and per.errors else "ok" if successes else "error"
+
+        return cls(
+            per_provider=[per],
+            status=per.status,
+            errors=list(per.errors),
+            last_attempt_at=datetime.now(),
+        )
 
     @classmethod
     def _base_snapshot(cls, provider_id: str = "") -> "TokenData":

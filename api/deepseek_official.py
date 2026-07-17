@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import requests
@@ -28,15 +29,24 @@ def _session() -> requests.Session:
 
 
 _SESSION = _session()
+build_session = _session
 BASE_URL = "https://api.deepseek.com"
 
 
-def _get(path: str) -> dict[str, Any]:
-    api_key = config_manager.get("DEEPSEEK_API_KEY", "").strip()
+def _get(
+    path: str,
+    config: Mapping[str, Any] | None = None,
+    *,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    api_key = str(
+        config.get("DEEPSEEK_API_KEY", "") if config is not None
+        else config_manager.get("DEEPSEEK_API_KEY", "")
+    ).strip()
     if not api_key:
         raise APIError("NOT_CONFIGURED", path, "未配置官方 API Key")
     try:
-        response = _SESSION.get(
+        response = (session or _SESSION).get(
             f"{BASE_URL}{path}",
             headers={"accept": "application/json", "authorization": f"Bearer {api_key}"},
             timeout=(5, 15),
@@ -60,9 +70,13 @@ def _get(path: str) -> dict[str, Any]:
     return payload
 
 
-def get_balance() -> dict[str, Any]:
-    return _get("/user/balance")
+def get_balance(
+    config: Mapping[str, Any] | None = None,
+    *,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    return _get("/user/balance", config, session=session)
 
 
-def get_models() -> dict[str, Any]:
-    return _get("/models")
+def get_models(config: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    return _get("/models", config)

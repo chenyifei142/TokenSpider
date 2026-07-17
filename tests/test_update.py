@@ -4,13 +4,16 @@ from pathlib import Path
 os.environ["APPDATA"] = str(Path.cwd() / ".test-appdata")
 
 import pytest
+from unittest.mock import Mock, patch
 
 from app_update import (
     GITHUB_LATEST_RELEASE_API_URL,
-    _is_allowed_download_url,
     _release_from_payload,
+    _is_allowed_download_url,
+    cleanup_pending_update,
     compare_versions,
     format_bytes,
+    is_safe_cleanup_path,
     normalize_version,
     stable_target_path,
 )
@@ -161,3 +164,77 @@ def test_format_bytes_uses_human_readable_units():
     assert format_bytes(0) == "未知"
     assert format_bytes(512) == "512 B"
     assert format_bytes(1024 * 1024) == "1.0 MB"
+
+
+def _run_cleanup(tmp_path, cleanup_paths):
+    updates = tmp_path / "updates"
+    updates.mkdir(exist_ok=True)
+    clear = Mock()
+    with (
+        patch("app_update.config_manager.load_pending_update_cleanup", return_value={
+            "version": 1,
+            "cleanup_paths": cleanup_paths,
+        }),
+        patch("app_update.config_manager.updates_dir", return_value=updates),
+        patch("app_update.config_manager.clear_pending_update_cleanup", clear),
+        patch("app_update.stable_target_path", return_value=tmp_path / "TokenSpider.exe"),
+    ):
+        cleanup_pending_update()
+    clear.assert_called_once()
+    return updates
+
+
+def test_update_cleanup_removes_only_relative_cache_descendants(tmp_path):
+    updates = tmp_path / "updates"
+    child_dir = updates / "v2" / "nested"
+    child_dir.mkdir(parents=True)
+    child_file = updates / "old.exe"
+    child_file.write_text("cache", encoding="utf-8")
+
+    _run_cleanup(tmp_path, ["v2", "old.exe", "missing.exe"])
+
+    assert not (updates / "v2").exists()
+    assert not child_file.exists()
+
+
+@pytest.mark.parametrize("unsafe", ["..\\outside.txt", ".", "\\", "C:\\"])
+def test_update_cleanup_rejects_traversal_roots_and_absolute_paths(tmp_path, unsafe):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep", encoding="utf-8")
+
+    _run_cleanup(tmp_path, [unsafe, str(outside), str(Path.home())])
+
+    assert outside.read_text(encoding="utf-8") == "keep"
+
+
+def test_update_cleanup_rejects_symlink_resolving_to_outside(tmp_path):
+    updates = tmp_path / "updates"
+    updates.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = updates / "linked"
+    original_resolve = Path.resolve
+    resolved_link = original_resolve(link, strict=False)
+    resolved_outside = original_resolve(outside, strict=False)
+
+    def resolve_symlink(path, strict=False):
+        resolved = original_resolve(path, strict=strict)
+        return resolved_outside if resolved == resolved_link else resolved
+
+    # Mocking resolve models both symbolic links and Windows directory junctions
+    # without requiring elevated link-creation privileges in the test runner.
+    with patch.object(Path, "resolve", new=resolve_symlink):
+        assert not is_safe_cleanup_path(Path("linked"), updates)
+
+
+def test_update_cleanup_ignores_and_clears_damaged_manifest(tmp_path):
+    manifest = tmp_path / "pending-update-cleanup.json"
+    manifest.write_text("{broken", encoding="utf-8")
+    clear = Mock()
+    with (
+        patch("app_update.config_manager.load_pending_update_cleanup", return_value={}),
+        patch("app_update.config_manager.PENDING_UPDATE_CLEANUP_PATH", manifest),
+        patch("app_update.config_manager.clear_pending_update_cleanup", clear),
+    ):
+        cleanup_pending_update()
+    clear.assert_called_once()

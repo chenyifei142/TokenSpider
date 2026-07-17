@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
+from types import MappingProxyType
 from zoneinfo import ZoneInfoNotFoundError
 
 os.environ["APPDATA"] = str(Path.cwd() / ".test-appdata")
@@ -87,6 +88,25 @@ class StoreTests(unittest.TestCase):
         months = months_for_activity(date(2026, 7, 4))
         self.assertEqual(months[0], (7, 2026))
         self.assertEqual(months[-1], (7, 2025))
+
+    def test_connection_uses_snapshot_without_touching_refresh_cache_or_history(self):
+        provider = FakeProvider(payloads=[payload("2026-07-03", 7, ".2")])
+        snapshot = MappingProxyType({"ACTIVE_PROVIDER": "deepseek", "DEEPSEEK_AUTH": "draft"})
+        existing = TokenData(status="ok", today_tokens=99)
+        TokenData._last_snapshot = existing
+
+        with (
+            patch("data.store.active_providers", return_value=iter([provider])) as active,
+            patch("data.store.history.save_usage") as save_usage,
+            patch("data.store.history.recent_daily") as recent_daily,
+        ):
+            result = TokenData.test_connection(snapshot)
+
+        active.assert_called_once_with(snapshot)
+        save_usage.assert_not_called()
+        recent_daily.assert_not_called()
+        self.assertIs(TokenData._last_snapshot, existing)
+        self.assertEqual(result.status, "ok")
 
     def test_dynamic_models_merge_remainder(self):
         stats = {

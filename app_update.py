@@ -242,16 +242,62 @@ def stable_target_path(current_executable: Path | None = None) -> Path:
     return current.with_name(MAIN_EXECUTABLE_NAME)
 
 
+def is_safe_cleanup_path(path: Path, allowed_root: Path) -> bool:
+    """Allow only relative descendants whose resolved target stays in the cache."""
+    if path.is_absolute():
+        return False
+    root = allowed_root.resolve(strict=False)
+    target = (root / path).resolve(strict=False)
+    if target == root:
+        return False
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def cleanup_pending_update() -> None:
     manifest = config_manager.load_pending_update_cleanup()
     if not manifest:
+        if config_manager.PENDING_UPDATE_CLEANUP_PATH.exists():
+            config_manager.logger().warning("Invalid deferred update cleanup manifest")
+            config_manager.clear_pending_update_cleanup()
         return
     if int(manifest.get("version", 0)) != MANIFEST_VERSION:
         config_manager.clear_pending_update_cleanup()
         return
     cleanup_paths = manifest.get("cleanup_paths", [])
+    if not isinstance(cleanup_paths, list):
+        config_manager.logger().warning("Invalid deferred update cleanup path list")
+        config_manager.clear_pending_update_cleanup()
+        return
+    allowed_root = config_manager.updates_dir().resolve(strict=False)
+    # The updater creates only this fixed backup beside the installed executable;
+    # never trust a manifest-provided absolute path as the whitelist source.
+    allowed_backups = {
+        stable_target_path().with_suffix(Path(MAIN_EXECUTABLE_NAME).suffix + ".bak").resolve(
+            strict=False
+        )
+    }
     for raw_path in cleanup_paths:
-        path = Path(str(raw_path))
+        if not isinstance(raw_path, str):
+            config_manager.logger().warning(
+                "Skipped invalid deferred update cleanup path: %r", raw_path
+            )
+            continue
+        raw = Path(raw_path)
+        resolved = (
+            raw.resolve(strict=False)
+            if raw.is_absolute()
+            else (allowed_root / raw).resolve(strict=False)
+        )
+        if resolved not in allowed_backups and not is_safe_cleanup_path(raw, allowed_root):
+            config_manager.logger().warning(
+                "Skipped unsafe deferred update cleanup path: %s", raw
+            )
+            continue
+        path = resolved
         try:
             if path.is_dir():
                 shutil.rmtree(path, ignore_errors=True)
@@ -540,9 +586,13 @@ class GitHubReleaseClient:
 def launch_updater(bundle: DownloadBundle) -> None:
     current_executable = Path(sys.executable).resolve()
     target_path = stable_target_path(current_executable)
-    cleanup_paths = [str(bundle.cache_dir)]
-    backup_hint = current_executable if current_executable != target_path else target_path
-    cleanup_paths.append(str(backup_hint.with_suffix(backup_hint.suffix + ".bak")))
+    updates_root = config_manager.updates_dir().resolve(strict=False)
+    cache_dir = bundle.cache_dir.resolve(strict=False)
+    try:
+        cleanup_paths = [str(cache_dir.relative_to(updates_root))]
+    except ValueError as exc:
+        raise UpdateError("更新缓存目录不在允许的清理范围内") from exc
+    cleanup_paths.append(str(target_path.with_suffix(target_path.suffix + ".bak")))
     config_manager.save_pending_update_cleanup(
         {
             "version": MANIFEST_VERSION,

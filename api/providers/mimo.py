@@ -21,6 +21,7 @@ import socket
 import struct
 import subprocess
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -96,7 +97,8 @@ class MiMoProvider(Provider):
         },
     }
 
-    def __init__(self) -> None:
+    def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+        super().__init__(config)
         self._session = build_session()
 
     # ------------------------------------------------------------------ helpers
@@ -142,8 +144,8 @@ class MiMoProvider(Provider):
 
     def is_configured(self) -> bool:
         return bool(
-            str(config_manager.get("MIMO_COOKIE", "")).strip()
-            or str(config_manager.get("MIMO_API_KEY", "")).strip()
+            str(self.config_get("MIMO_COOKIE", "")).strip()
+            or str(self.config_get("MIMO_API_KEY", "")).strip()
         )
 
     # --------------------------------------------------------- chrome helpers
@@ -523,7 +525,7 @@ class MiMoProvider(Provider):
         return cls.ACQUIRE_ERROR_MESSAGES.get(code, f"采集失败：{code}")
 
     def _base_url(self) -> str:
-        custom = str(config_manager.get("MIMO_BASE", "")).strip()
+        custom = str(self.config_get("MIMO_BASE", "")).strip()
         # 迁移早期版本默认指向 api.xiaomimimo.com；用量/余额端点只在 platform
         # platform.xiaomimimo.com 提供，因此把旧默认值替换为当前默认值。
         if custom in {"https://api.xiaomimimo.com", "api.xiaomimimo.com"}:
@@ -531,14 +533,14 @@ class MiMoProvider(Provider):
         return custom or _MIMO_PLATFORM
 
     def _platform_headers(self) -> dict[str, str]:
-        cookie_raw = str(config_manager.get("MIMO_COOKIE", "")).strip()
+        cookie_raw = str(self.config_get("MIMO_COOKIE", "")).strip()
         cookie = self.normalize_cookie(cookie_raw)
         # 若 Cookie 中已经自带 ``api-platform_ph``，以它为准，不再向 Cookie
         # 头注入额外值；否则尝试从 ``MIMO_API_PLATFORM_PH`` 注入。两种方式
         # 只会取一个，避免在 Cookie 中出现重复的 api-platform_ph 项。
         ph = self.extract_cookie_value(cookie, "api-platform_ph")
         if not ph:
-            ph = str(config_manager.get("MIMO_API_PLATFORM_PH", "")).strip()
+            ph = str(self.config_get("MIMO_API_PLATFORM_PH", "")).strip()
             if ph:
                 # 去外层引号，防止把 """" 拼到请求头里。
                 ph_decoded = ph.strip().strip('"').strip().replace("%2F", "/").replace("%3D", "=")
@@ -574,10 +576,10 @@ class MiMoProvider(Provider):
         """
         base = self._base_url()
         url = f"{base}{path}"
-        cookie_raw = str(config_manager.get("MIMO_COOKIE", "")).strip()
+        cookie_raw = str(self.config_get("MIMO_COOKIE", "")).strip()
         ph = self.extract_cookie_value(self.normalize_cookie(cookie_raw), "api-platform_ph")
         if not ph:
-            ph = str(config_manager.get("MIMO_API_PLATFORM_PH", "")).strip()
+            ph = str(self.config_get("MIMO_API_PLATFORM_PH", "")).strip()
         if ph:
             # 去引号并修剪空白，防止 URL 出现 "%22" 或空格导致 404。
             ph = ph.strip().strip('"').strip()

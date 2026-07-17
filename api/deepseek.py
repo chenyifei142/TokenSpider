@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any
 
 import requests
@@ -43,21 +44,26 @@ def _build_session() -> requests.Session:
 
 
 _SESSION = _build_session()
+build_session = _build_session
 
 
-def _headers() -> dict[str, str]:
-    base = config_manager.get("DEEPSEEK_BASE", "https://platform.deepseek.com")
+def _config_get(config: Mapping[str, Any] | None, key: str, default: Any = None) -> Any:
+    return config.get(key, default) if config is not None else config_manager.get(key, default)
+
+
+def _headers(config: Mapping[str, Any] | None = None) -> dict[str, str]:
+    base = _config_get(config, "DEEPSEEK_BASE", "https://platform.deepseek.com")
     # 该私有接口会通过浏览器标识做风控；缺少这些兼容头时会返回 HTML 429，而非正常 API 限流。
     # 版本集中保留在适配器中，平台策略变化时只需更新这里。
     return {
         "accept": "*/*",
         "accept-language": "zh-CN,zh;q=0.9",
-        "authorization": config_manager.get("DEEPSEEK_AUTH", ""),
+        "authorization": _config_get(config, "DEEPSEEK_AUTH", ""),
         "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
         "x-app-version": "20240425.0",
-        "cookie": config_manager.get("DEEPSEEK_COOKIE", ""),
+        "cookie": _config_get(config, "DEEPSEEK_COOKIE", ""),
         "referer": f"{base}/usage",
         "user-agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -77,20 +83,26 @@ def _error_code(status_code: int) -> str:
     return "UNKNOWN_ERROR"
 
 
-def _get(path: str, *, params: dict[str, int] | None = None) -> Any:
-    auth = str(config_manager.get("DEEPSEEK_AUTH", "")).strip()
-    cookie = str(config_manager.get("DEEPSEEK_COOKIE", "")).strip()
+def _get(
+    path: str,
+    *,
+    params: dict[str, int] | None = None,
+    config: Mapping[str, Any] | None = None,
+    session: requests.Session | None = None,
+) -> Any:
+    auth = str(_config_get(config, "DEEPSEEK_AUTH", "")).strip()
+    cookie = str(_config_get(config, "DEEPSEEK_COOKIE", "")).strip()
     if not auth and not cookie:
         # 在发起网络请求前区分“未配置”和“凭据失效”，让面板能给出准确设置引导。
         raise APIError(
             "NOT_CONFIGURED", path.rsplit("/", 1)[-1],
             "尚未配置 Token/Cookie，请先打开设置"
         )
-    base = config_manager.get("DEEPSEEK_BASE", "https://platform.deepseek.com").rstrip("/")
+    base = str(_config_get(config, "DEEPSEEK_BASE", "https://platform.deepseek.com")).rstrip("/")
     endpoint = path.rsplit("/", 1)[-1]
     try:
-        response = _SESSION.get(
-            f"{base}{path}", headers=_headers(), params=params, timeout=(5, 15)
+        response = (session or _SESSION).get(
+            f"{base}{path}", headers=_headers(config), params=params, timeout=(5, 15)
         )
     except requests.Timeout as exc:
         raise APIError("NETWORK_TIMEOUT", endpoint, "连接 DeepSeek 超时") from exc
@@ -128,22 +140,48 @@ def _get(path: str, *, params: dict[str, int] | None = None) -> Any:
         ) from exc
 
 
-def get_user_summary() -> dict[str, Any]:
-    result = _get("/api/v0/users/get_user_summary")
+def get_user_summary(
+    config: Mapping[str, Any] | None = None,
+    *,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    result = _get("/api/v0/users/get_user_summary", config=config, session=session)
     if not isinstance(result, dict):
         raise APIError("INVALID_RESPONSE", "get_user_summary", "账户摘要格式异常")
     return result
 
 
-def get_usage_amount(month: int, year: int) -> dict[str, Any]:
-    result = _get("/api/v0/usage/amount", params={"month": month, "year": year})
+def get_usage_amount(
+    month: int,
+    year: int,
+    config: Mapping[str, Any] | None = None,
+    *,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    result = _get(
+        "/api/v0/usage/amount",
+        params={"month": month, "year": year},
+        config=config,
+        session=session,
+    )
     if not isinstance(result, dict):
         raise APIError("INVALID_RESPONSE", "amount", "Token 用量格式异常")
     return result
 
 
-def get_usage_cost(month: int, year: int) -> dict[str, Any]:
-    result = _get("/api/v0/usage/cost", params={"month": month, "year": year})
+def get_usage_cost(
+    month: int,
+    year: int,
+    config: Mapping[str, Any] | None = None,
+    *,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    result = _get(
+        "/api/v0/usage/cost",
+        params={"month": month, "year": year},
+        config=config,
+        session=session,
+    )
     if isinstance(result, list):
         result = result[0] if result else {}
     if not isinstance(result, dict):

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QToolButton,
     QWidget,
+    QMessageBox,
 )
 
 from app_update import CheckResult, ReleaseAsset, ReleaseInfo, SemVer
@@ -1293,6 +1294,54 @@ def test_settings_keep_unsaved_provider_drafts_when_switching():
         assert window._provider_widgets["AUTH"].text() == "draft-token"
         assert window._provider_widgets["AUTH"].echoMode() == QLineEdit.EchoMode.Password
         window.close()
+
+
+def test_connection_test_rejects_untrusted_base_without_starting_worker():
+    values = {**config_manager.all_config(), "ACTIVE_PROVIDER": "deepseek"}
+    original = config_manager.all_config()
+    with (
+        patch("ui.qt_settings.config_manager.load_config", return_value=values),
+        patch("ui.qt_settings.config_manager.all_config", return_value=values),
+        patch(
+            "ui.qt_settings.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.No,
+        ) as question,
+        patch("ui.qt_settings.ConnectionWorker") as worker,
+    ):
+        window = SettingsWindow()
+        window._provider_widgets["BASE"].setText("https://untrusted.example")
+        window._test_connection()
+
+    question.assert_called_once()
+    worker.assert_not_called()
+    assert config_manager.all_config() == original
+    window.close()
+
+
+def test_connection_test_passes_read_only_snapshot_without_changing_global_config():
+    values = {**config_manager.all_config(), "ACTIVE_PROVIDER": "deepseek"}
+    original = config_manager.all_config()
+    with (
+        patch("ui.qt_settings.config_manager.load_config", return_value=values),
+        patch("ui.qt_settings.config_manager.all_config", return_value=values),
+        patch(
+            "ui.qt_settings.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ),
+        patch("ui.qt_settings.ConnectionWorker") as worker_cls,
+    ):
+        window = SettingsWindow()
+        window._provider_widgets["AUTH"].setText("draft-auth")
+        window._provider_widgets["BASE"].setText("https://untrusted.example")
+        window._test_connection()
+
+    snapshot = worker_cls.call_args.args[0]
+    assert snapshot["DEEPSEEK_AUTH"] == "draft-auth"
+    with pytest.raises(TypeError):
+        snapshot["DEEPSEEK_AUTH"] = "changed"
+    worker_cls.return_value.start.assert_called_once()
+    assert config_manager.all_config() == original
+    window.close()
 
 
 def test_settings_exposes_deepseek_peak_pricing_and_keeps_unsaved_times():

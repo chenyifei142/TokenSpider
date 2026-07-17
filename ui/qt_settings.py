@@ -6,6 +6,8 @@ selected provider are shown — keeping the dialog small and focused.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any, Callable, Union
 
 from PySide6.QtCore import QSignalBlocker, QThread, QTime, QTimer, Signal
@@ -45,9 +47,13 @@ _CARD_PADDING = 18
 class ConnectionWorker(QThread):
     finished_with_data = Signal(object)
 
+    def __init__(self, config: Mapping[str, Any], parent=None):
+        super().__init__(parent)
+        self._config = config
+
     def run(self) -> None:
         try:
-            result = TokenData.fetch()
+            result = TokenData.test_connection(self._config)
         except Exception as exc:
             config_manager.logger().exception("Connection test failed")
             result = TokenData(
@@ -107,7 +113,6 @@ class SettingsWindow(QDialog):
         self._rendered_provider_id = ""
         self._provider_widgets: dict[str, Union[QLineEdit, QPlainTextEdit]] = {}
         self._provider_drafts: dict[str, dict[str, str]] = {}
-        self._test_config_backup: dict[str, Any] | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 16, 18, 16)
@@ -926,34 +931,33 @@ class SettingsWindow(QDialog):
 
     def _test_connection(self) -> None:
         try:
-            candidate = self._values()
-            self._test_config_backup = config_manager.all_config()
-            config_manager._config.update(candidate)
+            candidate = config_manager.validate_config(self._values())
         except Exception as exc:
             self._set_feedback(
                 self.connection_feedback, f"请先修正配置：{exc}", "danger"
             )
             return
+        for key, value in candidate.items():
+            if key.endswith("_BASE") and value and not config_manager.is_official_base_url(value):
+                result = QMessageBox.question(
+                    self,
+                    "非官方 API 地址",
+                    f"{key} 会接收当前平台凭据，确认信任并测试连接吗？",
+                )
+                if result != QMessageBox.StandardButton.Yes:
+                    return
         self.test_button.setEnabled(False)
         self.test_button.setText("测试中…")
         self._set_feedback(
             self.connection_feedback, "正在使用当前输入的凭据测试连接…", "muted"
         )
-        self._worker = ConnectionWorker(self)
+        # MappingProxyType makes accidental mutation in the worker fail immediately;
+        # validation has already produced an independent merged configuration copy.
+        self._worker = ConnectionWorker(MappingProxyType(candidate), self)
         self._worker.finished_with_data.connect(self._connection_result)
         self._worker.start()
 
     def _connection_result(self, data: TokenData) -> None:
-        if self._test_config_backup is not None:
-            # Theme changes are saved immediately while the connection worker is
-            # running, so restoring credential drafts must preserve that newer mode.
-            active_theme = config_manager._config.get(
-                "UI_THEME", self._test_config_backup.get("UI_THEME", "dark")
-            )
-            restored = self._test_config_backup.copy()
-            restored["UI_THEME"] = active_theme
-            config_manager._config = restored
-            self._test_config_backup = None
         self.test_button.setEnabled(True)
         self.test_button.setText("测试连接")
         if data.status in {"ok", "partial"}:
