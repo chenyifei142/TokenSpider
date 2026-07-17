@@ -1,4 +1,4 @@
-"""TokenSpider 配置字段示例；v1.1 请通过设置窗口保存，不要复制真实凭据。"""
+"""TokenMeter 配置字段示例；请通过设置窗口保存，不要复制真实凭据。"""
 
 # DeepSeek API credentials
 DEEPSEEK_API_KEY = ""  # 可选：官方 API Key，用于稳定的余额接口

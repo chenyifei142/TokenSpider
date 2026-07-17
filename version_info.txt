@@ -14,11 +14,11 @@ VSVersionInfo(
       StringTable(
         '040904B0',
         [
-          StringStruct('FileDescription', 'TokenSpider API usage monitor'),
+          StringStruct('FileDescription', 'TokenMeter API usage monitor'),
           StringStruct('FileVersion', '1.9.1'),
-          StringStruct('InternalName', 'TokenSpider'),
-          StringStruct('OriginalFilename', 'TokenSpider.exe'),
-          StringStruct('ProductName', 'TokenSpider'),
+          StringStruct('InternalName', 'TokenMeter'),
+          StringStruct('OriginalFilename', 'TokenMeter.exe'),
+          StringStruct('ProductName', 'TokenMeter'),
           StringStruct('ProductVersion', '1.9.1')
         ]
       )

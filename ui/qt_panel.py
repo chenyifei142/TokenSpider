@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 import config_manager
+from app_identity import APP_DISPLAY_NAME
 from data.store import TokenData
 from ui.activity import compact_tokens
 from ui.qt_heatmap import TokenActivityHeatmap
@@ -1603,7 +1604,7 @@ class MainPanel(QFrame):
         logo = QLabel()
         logo.setPixmap(app_icon(28).pixmap(28, 28))
         logo.setFixedSize(28, 28)
-        self._title_label = QLabel("TokenSpider")
+        self._title_label = QLabel(APP_DISPLAY_NAME)
         self._title_label.setObjectName("panelTitle")
         provider_id = str(config_manager.get("ACTIVE_PROVIDER", "deepseek"))
         provider_name = {"deepseek": "DeepSeek", "mimo": "小米 MiMo"}.get(

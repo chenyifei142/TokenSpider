@@ -25,6 +25,7 @@ from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QPalette, Q
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QMenu, QSystemTrayIcon, QWidget
 
 import config_manager
+from app_identity import APP_DISPLAY_NAME
 from deepseek_pricing import BEIJING_TIMEZONE, PricingState, pricing_state
 from data.store import TokenData
 from api.providers.base import FetchError
@@ -810,7 +811,7 @@ class FloatingWidget(QWidget):
         tray = getattr(self, "tray", None)
         if tray is not None:
             tray.showMessage(
-                "TokenSpider：登录凭据已失效",
+                f"{APP_DISPLAY_NAME}：登录凭据已失效",
                 f"{auth_error.message}\n点击此通知即可重新获取 Cookie。",
                 QSystemTrayIcon.MessageIcon.Warning,
                 10_000,
@@ -862,7 +863,7 @@ class FloatingWidget(QWidget):
         tray = getattr(self, "tray", None)
         if tray is not None:
             tray.showMessage(
-                "TokenSpider：MiMo 自动续期失败",
+                f"{APP_DISPLAY_NAME}：MiMo 自动续期失败",
                 f"{message}\n点击此通知可手动重新获取 Cookie。",
                 QSystemTrayIcon.MessageIcon.Warning,
                 10_000,
@@ -919,7 +920,7 @@ class FloatingWidget(QWidget):
             and self.tray is not None
         ):
             self.tray.showMessage(
-                "TokenSpider：DeepSeek 已进入高峰计价",
+                f"{APP_DISPLAY_NAME}：DeepSeek 已进入高峰计价",
                 "当前所有计费项按平时价格 2 倍计费，"
                 f"本时段至 {current.next_boundary.strftime('%H:%M')}（北京时间）。",
                 QSystemTrayIcon.MessageIcon.Warning,

@@ -1,190 +1,124 @@
-# TokenSpider
-
 <p align="center">
-  <strong>DeepSeek / 小米 MiMo 用量监控桌面悬浮窗</strong><br>
-  <sub>在 Windows 桌面实时查看余额、Token 用量、费用趋势与年度活跃记录</sub>
+  <a href="./README.md">简体中文</a> |
+  <a href="./README.en.md">English</a> |
+  <a href="./README.zh-TW.md">繁體中文</a> |
+  <a href="./README.ja.md">日本語</a> |
+  <a href="./README.ko.md">한국어</a>
 </p>
 
+# TokenMeter
+
 <p align="center">
-  <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&amp;logoColor=white">
-  <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&amp;logoColor=white">
-  <img alt="Version 1.9.1" src="https://img.shields.io/badge/version-1.9.1-2f6fe4">
+  <strong>Windows AI Token 用量、费用与余额监控工具</strong><br>
+  <sub>AI Token Usage, Cost & Balance Monitor for DeepSeek and Xiaomi MiMo.</sub>
 </p>
 
-TokenSpider 是一个面向 Windows 的 AI 平台用量监控工具。程序常驻系统托盘，以悬浮球展示核心数据；点击后可展开完整面板，查看余额、今日与本周用量、费用趋势、模型统计和过去一年的活跃记录。支持 DeepSeek 与 小米 Mimo 两个平台，可在设置中切换。
+TokenMeter 是一款轻量级 Windows 桌面 AI Token 用量监控工具，用于查看 DeepSeek、小米 MiMo 等平台的 Token 消耗、调用费用、账户余额和历史趋势。程序常驻系统托盘，通过悬浮球和展开面板提供 token usage tracker、AI cost monitor、balance monitor 与 Windows desktop widget 体验。
 
 ## 功能
 
-- 多平台支持：DeepSeek / 小米 MiMo，设置中可自由切换且缓存互不混用
-- 悬浮球与系统托盘常驻，支持自由拖动、边缘吸附和位置记忆
-- 支持配置面板失焦后自动收起为悬浮球
-- 小米 MiMo Cookie 失效时优先通过专用浏览器会话在后台自动续期，仅在 SSO 登录态失效时显示登录窗口
-- 设置按账户、运行行为和软件更新分区；DeepSeek 与 MiMo 均支持浏览器获取 Cookie
-- Codex 风格浅色、深色主题与 Windows 系统主题跟随，可在面板或设置中即时切换
-- 展示账户余额、余额可用 Token、本月 Token 用量和累计费用
-- DeepSeek 统计今日、本周及各模型的 Token 用量与费用
-- DeepSeek 可按北京时间配置峰谷计价提示；面板实时标识当前价格倍数，悬浮球在峰时增强橙色光晕
-- 小米 MiMo 展示账户余额、本月费用与各模型日 Token 消耗（含 cache hit）
-- 绘制每日费用趋势和过去一年的 Token 活跃热力图
-- 今日分时 Token 图保留分钟级缓存，可按设置的 1–60 分钟间隔聚合，并在柱状图与折线图之间切换，支持分时导航、图例显隐与悬浮明细
-- 面板与悬浮球均按设置的刷新间隔自动刷新，也可手动刷新；MiMo 悬浮球会轻量读取当前月数据，及时更新金额而不等待历史补同步
-- 网络或接口异常时保留最近一次成功数据，并显示明确的错误状态
-- 将历史账单缓存在本地 SQLite 数据库，分批补全过去一年的记录
-- 将 API Key、Bearer Token 和 Cookie 保存到 Windows 凭据管理器
-- 可在设置中迁移全部应用数据目录，包括配置、历史数据库、日志、更新缓存和专用浏览器会话
-- 单实例运行，避免重复启动多个悬浮窗
-- Token 显示支持「万 / 亿」自适应单位；大型账户数值一目了然
+- 支持 DeepSeek 与 Xiaomi MiMo，平台缓存互不混用。
+- 悬浮球和系统托盘常驻，支持拖动、边缘吸附、位置记忆与失焦收起。
+- 提供浅色、深色及跟随 Windows 的主题。
+- 展示余额、Token 用量、费用趋势、模型统计、分时图和年度活跃热力图。
+- DeepSeek 支持峰谷计价提示；MiMo Cookie 可通过专用 Chrome 会话获取和续期。
+- 网络异常时保留最近成功数据；历史数据缓存在本地 SQLite。
+- API Key、Bearer Token 和 Cookie 保存到 Windows 凭据管理器。
+- 支持迁移应用数据目录、自动更新及单实例运行。
 
-## 界面设计
+## 界面截图
 
-<table>
-  <tr>
-    <th>浅色主题</th>
-    <th>深色主题</th>
-  </tr>
-  <tr>
-    <td><img src="docs/images/token-spider-ui-v3-light.png" alt="TokenSpider 第 3 套浅色主题设计稿"></td>
-    <td><img src="docs/images/token-spider-ui-v3-dark.png" alt="TokenSpider 第 3 套深色主题设计稿"></td>
-  </tr>
-</table>
+| 浅色主题 | 深色主题 |
+| --- | --- |
+| ![TokenMeter 浅色主题](docs/images/token-spider-ui-v3-light.png) | ![TokenMeter 深色主题](docs/images/token-spider-ui-v3-dark.png) |
 
-## 运行要求
+## 系统要求
 
-- Windows 10 或 Windows 11
-- Python 3.11 或更高版本
-- DeepSeek 账户或小米 MiMo Token Plan 账户
-- 对应平台的 Bearer Token / Cookie，用于读取用量数据
-- DeepSeek API Key（可选），用于通过官方接口读取账户余额
+- Windows 10 或 Windows 11；源码运行需要 Python 3.11+。
+- DeepSeek 账户或 Xiaomi MiMo Token Plan 账户及对应 Cookie / Token。
+- DeepSeek API Key 可选，用于官方余额接口。
 
 > [!IMPORTANT]
-> DeepSeek 与 MiMo 的用量/余额与日均依赖网页控制台接口；**MiMo 还需在凭据中同时包含 `api-platform_ph` 字段，并读取 `balance / usage` 与 `usage/detail/list` 等接口**。平台接口、鉴权方式或风控策略发生变化时，部分数据可能暂时无法读取。请仅使用自己的账户凭据，并妥善保管相关信息。
+> 用量数据依赖平台网页控制台接口；MiMo Cookie 需包含 `api-platform_ph`。平台接口或风控变化可能暂时影响数据。请仅使用自己的账户凭据并妥善保管。
 
 ## 下载
 
-前往 [GitHub Releases](https://github.com/zensoku142/TokenSpider/releases/tag/v1.9.1) 下载 Windows 便携版：
-
-- `TokenSpider-v1.9.1-windows-x64.exe`
-
-程序无需预装 Python。首次运行若被 Windows SmartScreen 提示，请核对发布页中的 SHA256 后再决定是否运行。
+从 [GitHub Releases](https://github.com/zensoku142/TokenMeter/releases/latest) 下载 `TokenMeter-v{version}-windows-x64.exe`。便携版无需预装 Python；遇到 SmartScreen 提示时请先核对 `SHA256SUMS.txt`。
 
 ## 快速开始
 
-在 PowerShell 中执行：
-
 ```powershell
-git clone https://github.com/zensoku142/TokenSpider.git
-cd TokenSpider
-
+git clone https://github.com/zensoku142/TokenMeter.git
+cd TokenMeter
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 python main.py
 ```
 
-如果 PowerShell 不允许激活虚拟环境，可以直接使用虚拟环境中的 Python：
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe main.py
-```
-
 ## 首次配置
 
-1. 启动程序，点击悬浮球展开面板。
-2. 打开「设置」 → 在「数据来源」下拉列表中选择 **DeepSeek** 或 **小米 MiMo**。
-3. 填写对应平台的凭据：
-   - **DeepSeek**：Bearer Token 或 Cookie；如有官方 API Key 可一并填写
-   - **小米 MiMo**：登录 `platform.xiaomimimo.com` 后复制浏览器请求中的**完整 Cookie**（通常包含 `api-platform_serviceToken`、`userId`、`api-platform_slh`、`api-platform_ph`）；Cookie 中的 `api-platform_ph` 会被自动提取并回填到对应输入框，无需手动复制粘贴第二次。也可直接在凭据区域点击「一键获取 MiMo Cookie」，按提示拉起本机 Chrome 完成登录后回填。后续 Cookie 失效时，程序会复用该专用浏览器会话在后台续期；只有小米 SSO 登录态也失效时才会显示登录窗口。
-4. 保存设置并执行刷新。
+1. 启动程序并点击悬浮球展开面板。
+2. 打开“设置”，选择 DeepSeek 或 Xiaomi MiMo。
+3. 填写 Bearer Token、Cookie 或可选的 DeepSeek API Key。MiMo 可点击“一键获取 MiMo Cookie”，程序会自动提取 `api-platform_ph`。
+4. 保存设置并刷新。默认刷新间隔为 60 秒。
 
-默认刷新间隔为 60 秒。切换平台后，面板会立即进入该平台自己的未配置、加载、成功或失败状态，不会短暂展示上一平台数据。
+`config.example.py` 仅展示配置项；无需复制为 `config.py`。旧版 `config.py` 会在首次启动时尝试迁移。
 
-仓库中的 [`config.example.py`](config.example.py) 仅用于展示可配置项。新版程序会自动生成运行时配置，无需将其复制为 `config.py`。如果程序目录中存在旧版 `config.py`，首次启动时会尝试迁移配置并移除其中的明文凭据。
+## 本地数据与隐私
 
-## 本地数据与安全
+为了兼容 TokenSpider 旧版本，TokenMeter 当前仍沿用 `%APPDATA%\TokenSpider` 作为默认数据目录。Windows 凭据管理器中的目标名仍以 `TokenSpider/` 开头，单实例锁仍为 `Local\TokenSpider.SingleInstance`；改名后无需重新登录。请勿手动删除或重命名该目录。将来若迁移到 `%APPDATA%\TokenMeter`，应由程序自动、事务式完成。
 
-程序数据默认保存在 `%APPDATA%\TokenSpider`：
+主要文件包括 `config.json`、`usage.db`、`widget-state.json` 和 `TokenSpider.log`。可在“设置 → 运行行为 → 应用数据目录”选择新的本地空目录，重启后完成事务式复制；不支持网络共享路径。敏感凭据不会写入 `config.json`。
 
-| 文件 | 用途 |
-| --- | --- |
-| `config.json` | 非敏感设置，不包含 API Key、Token 或 Cookie |
-| `usage.db` | 本地用量与费用历史缓存 |
-| `widget-state.json` | 悬浮球位置 |
-| `TokenSpider.log` | 运行日志，单文件最大 2 MB，最多保留 3 个备份 |
+## 自动更新
 
-可在「设置 → 运行行为 → 应用数据目录」中选择新的本地空目录。保存后需重启程序，程序会在数据库和日志打开前复制配置、历史数据库、界面状态、日志、更新数据及 DeepSeek/MiMo 专用浏览器会话；全部复制成功后才切换目录，并清理原数据目录。网络共享路径不受支持，也不建议选择由网盘同步的目录。
-
-固定引导文件 `%APPDATA%\TokenSpider\location.json` 仅用于记录当前数据目录，不随数据迁移。恢复默认目录时，如默认目录已有旧数据，程序会先将其保留到 `migration-backup-*` 子目录。
-
-可在「设置 → 运行行为 → 分时统计间隔」设置今日分时图的展示粒度，支持 1–60 分钟，默认 5 分钟。该设置只合并图表中的时间桶，底层仍保留分钟级估算数据，因此切换间隔不会丢失历史明细或改变统计总量。
-
-可通过「分时图表样式」切换柱状图或折线图，默认保持柱状图；主图、导航和图例会立即按所选样式重绘，不改变缓存或统计口径。两种图表都会压缩无消耗时段，将有效时间桶等距排列；折线图会额外进行有界平滑连接，横轴标签和悬浮明细仍显示真实时间。
-
-可在「设置 → 运行行为 → 分时数据保存天数」设置分时估算缓存的保留时长，默认保留最近 3 天（含当天）。程序启动后的首次自动刷新会清理超期分时数据，不影响日账单、年度活动和其他历史统计。
-
-敏感凭据保存在 Windows 凭据管理器中，目标名称以 `TokenSpider/` 开头。保存新设置前，程序会备份普通配置；写入失败时会回滚凭据，避免新旧配置混用。
-
-## 性能与能源
-
-程序在空闲时做了多项优化，降低 CPU / 唤醒次数：
-
-- 悬浮球仅在数值变化时重绘；没有变化时不再触发抗锯齿/渐变绘制。
-- 移除每 30 秒一次的空刷新循环；只有 API 返回新数据后才更新 UI。
-- 贴边隐藏后仅在悬浮球附近检测鼠标，不会因经过屏幕其他边缘而误唤出。
-- 刷新间隔根据窗口状态自适应：面板展开使用配置间隔，小球可见时至少 5 分钟，贴边隐藏时至少 10 分钟。
-- 粘贴 Cookie 时自动规范化多余空白、换行和大小写无关紧要的标点。
-
-贴边吸附、隐藏和唤出共用一个带缓动的位置动画，展开面板或拖动期间会暂停自动隐藏。
+更新检查访问 `zensoku142/TokenMeter` 的 GitHub Releases。新版附件名为 `TokenMeter-*`，同时继续识别 `TokenSpider-*` 与 `TokenScope-*` 旧附件。若当前程序是 `TokenSpider.exe` 或 `TokenScope.exe`，更新会保留原稳定路径，避免旧快捷方式失效；版本化下载文件则迁移到 `TokenMeter.exe`。
 
 ## 测试
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q
+python -m pytest -q
 ```
 
-Qt 测试会创建界面组件，建议在可用的 Windows 桌面会话中运行。
+Qt 测试建议在可用的 Windows 桌面会话中运行。
 
-## 构建 Windows 可执行文件
-
-项目提供了 PyInstaller 配置：
+## 构建
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install pyinstaller
-.\.venv\Scripts\pyinstaller.exe --clean --noconfirm TokenSpider.spec
+python -m pip install pyinstaller
+.\.venv\Scripts\pyinstaller.exe --clean --noconfirm TokenMeter.spec
+python scripts/build_release.py
 ```
 
-已验证的发布环境为 Python 3.12、PyInstaller 6.21、PySide6 6.11。构建产物位于 `dist\TokenSpider-v1.3.2-windows-x64.exe` 与 `dist\TokenSpiderUpdater-v1.3.2-windows-x64.exe`。主程序固定输出 `TokenSpider.exe` 供原地升级复用，发布脚本会额外生成版本化附件与 `SHA256SUMS.txt`；spec 会保留 pyqtgraph 启动所需的 Qt OpenGL 桥接模块及其顶层必需包，仅排除项目未使用的 Qt QML/Quick/PDF/测试组件和非 Windows 平台插件；`build*`、`dist*` 与构建虚拟环境均被 Git 忽略。
-
-`upx=True` 只会在本机已安装 UPX 时生效；UPX 不是必需依赖。发布前必须重新验证启动、托盘、图表和退出流程，因为压缩 Qt DLL 可能增加杀毒软件误报。
+发布脚本生成 `dist\TokenMeter.exe`、`dist\TokenMeterUpdater.exe`、两个版本化附件及 `dist\SHA256SUMS.txt`。已验证发布环境为 Python 3.12、PyInstaller 6.21、PySide6 6.11；UPX 可选。
 
 ## 项目结构
 
 ```text
-TokenSpider/
-├── api/providers/       # 各平台接口适配器（DeepSeek、小米 Mimo）
-├── data/                # 数据聚合、SQLite 历史缓存
-├── tests/               # 单元测试与 Qt 界面测试
-├── ui/                  # PySide6 悬浮球、面板、设置与托盘界面
-├── config_manager.py    # 配置、凭据迁移与日志管理
-├── config.example.py    # 配置项示例
-├── main.py              # 应用入口与单实例控制
-├── TokenSpider.spec     # PyInstaller 构建配置
-└── requirements.txt     # Python 依赖
+TokenMeter/
+├── api/providers/       # DeepSeek 与 Xiaomi MiMo 适配器
+├── data/                # 聚合与 SQLite 历史缓存
+├── tests/               # 单元与 Qt 测试
+├── ui/                  # PySide6 界面
+├── app_identity.py      # 展示品牌与兼容身份
+├── config_manager.py    # 配置、凭据与日志
+├── main.py              # 应用入口
+└── TokenMeter.spec      # PyInstaller 配置
 ```
 
 ## 故障排查
 
-- **提示尚未配置**：在设置中选择提供商（DeepSeek / 小米 MiMo）并填写对应凭据。
-- **提示凭据失效**：程序会先在后台尝试续期小米 MiMo Cookie；若专用浏览器中的小米 SSO 登录态也已失效，会显示登录窗口。仍无法续期时，可在凭据区域点击「一键获取 MiMo Cookie」重新登录；程序会自动提取并同步更新 `api-platform_ph`。
-- **提示请求过于频繁或平台风控拒绝请求**：等待一段时间后再手动刷新；不要持续缩短刷新间隔。
-- **数据暂时没有更新**：程序会继续显示上一次成功获取的缓存，可查看 `%APPDATA%\TokenSpider\TokenSpider.log` 获取详细信息。
-- **程序没有出现窗口**：检查系统托盘；TokenSpider 只允许一个实例运行。
-- **大数字显示过长**：≥ 1 亿的 Token 会以「亿」为单位显示，无需额外处理。
+- 未配置：在设置中选择平台并填写凭据。
+- 凭据失效：重新获取 Cookie；MiMo 会先尝试复用专用浏览器会话。
+- 请求频繁或风控：等待后再刷新，不要持续缩短间隔。
+- 数据未更新：查看 `%APPDATA%\TokenSpider\TokenSpider.log`。
+- 未出现窗口：检查系统托盘；程序只允许一个实例。
 
-## 更新说明
+## 版本与 Release
 
-README 仅用于项目介绍、使用说明和当前版本信息。各版本的更新记录请查看 [GitHub Releases](https://github.com/zensoku142/TokenSpider/releases)。
+当前版本：`1.9.1`。更新记录及校验文件见 [GitHub Releases](https://github.com/zensoku142/TokenMeter/releases)。
 
-## 版本
+## License
 
-当前版本：`1.9.1`
+仓库当前未提供独立许可证文件；使用或分发前请联系项目维护者确认授权。

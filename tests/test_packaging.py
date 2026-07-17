@@ -20,7 +20,7 @@ def _call_keywords(path: str, name: str) -> dict[str, object]:
 
 
 def test_pyqtgraph_startup_modules_are_packaged():
-    options = _call_keywords("TokenSpider.spec", "Analysis")
+    options = _call_keywords("TokenMeter.spec", "Analysis")
     excluded = set(options["excludes"])
     required = {
         "pyqtgraph.imageview",
@@ -36,14 +36,14 @@ def test_pyqtgraph_startup_modules_are_packaged():
 
 
 def test_main_executable_uses_stable_name_and_project_icon():
-    options = _call_keywords("TokenSpider.spec", "EXE")
+    options = _call_keywords("TokenMeter.spec", "EXE")
 
-    assert options["name"] == "TokenSpider"
+    assert options["name"] == "TokenMeter"
     assert options["icon"] == ["assets/TokenSpider.ico"]
 
 
 def test_updater_executable_is_packaged_separately():
-    options = _call_keywords("TokenSpiderUpdater.spec", "EXE")
+    options = _call_keywords("TokenMeterUpdater.spec", "EXE")
 
-    assert options["name"] == "TokenSpiderUpdater"
+    assert options["name"] == "TokenMeterUpdater"
     assert options["icon"] == ["assets/TokenSpider.ico"]

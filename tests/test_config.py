@@ -11,6 +11,13 @@ import config_manager
 
 
 class ConfigTests(unittest.TestCase):
+    def test_legacy_data_directory_and_credential_prefix_remain_stable(self):
+        self.assertEqual(config_manager.DEFAULT_CONFIG_DIR.name, "TokenSpider")
+        self.assertEqual(
+            config_manager._credential_target("DEEPSEEK_API_KEY"),
+            "TokenSpider/DEEPSEEK_API_KEY",
+        )
+
     def test_deepseek_peak_pricing_defaults_and_period_validation(self):
         defaults = config_manager.validate_config({})
         self.assertFalse(defaults["DEEPSEEK_PEAK_PRICING_ENABLED"])

@@ -59,14 +59,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: TokenSpider ${{ github.ref_name }}
+          name: TokenMeter ${{ github.ref_name }}
           draft: false
           prerelease: ${{ steps.channel.outputs.is_prerelease }}
           make_latest: ${{ steps.channel.outputs.make_latest }}
           body_path: ${{ steps.notes.outputs.body_path }}
           files: |
-            dist/TokenSpider-v*-windows-x64.exe
-            dist/TokenSpiderUpdater-v*-windows-x64.exe
+            dist/TokenMeter-v*-windows-x64.exe
+            dist/TokenMeterUpdater-v*-windows-x64.exe
             dist/SHA256SUMS.txt
 
       - name: Publish GitHub Release Without Body
@@ -74,11 +74,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: TokenSpider ${{ github.ref_name }}
+          name: TokenMeter ${{ github.ref_name }}
           draft: false
           prerelease: ${{ steps.channel.outputs.is_prerelease }}
           make_latest: ${{ steps.channel.outputs.make_latest }}
           files: |
-            dist/TokenSpider-v*-windows-x64.exe
-            dist/TokenSpiderUpdater-v*-windows-x64.exe
+            dist/TokenMeter-v*-windows-x64.exe
+            dist/TokenMeterUpdater-v*-windows-x64.exe
             dist/SHA256SUMS.txt

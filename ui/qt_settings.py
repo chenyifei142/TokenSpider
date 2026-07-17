@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 import config_manager
+from app_identity import APP_DISPLAY_NAME
 from api.providers import PROVIDERS, list_providers
 from api.providers.base import FetchError
 from data.store import TokenData
@@ -94,7 +95,7 @@ class SettingsWindow(QDialog):
         update_controller: AppUpdateController | None = None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("TokenSpider 设置")
+        self.setWindowTitle(f"{APP_DISPLAY_NAME} 设置")
         self.setModal(False)
         self.setMinimumWidth(560)
         self.setMaximumWidth(720)

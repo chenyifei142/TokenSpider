@@ -25,8 +25,8 @@ from app_identity import (
     GITHUB_LATEST_RELEASE_API_URL,
     GITHUB_RELEASES_API_URL,
     GITHUB_REPOSITORY,
-    LEGACY_MAIN_RELEASE_ASSET_TEMPLATE,
-    LEGACY_UPDATER_RELEASE_ASSET_TEMPLATE,
+    LEGACY_MAIN_RELEASE_ASSET_TEMPLATES,
+    LEGACY_UPDATER_RELEASE_ASSET_TEMPLATES,
     MAIN_EXECUTABLE_NAME,
     MAIN_RELEASE_ASSET_TEMPLATE,
     SHA256_RELEASE_ASSET_NAME,
@@ -46,11 +46,11 @@ _SEMVER_RE = re.compile(
     r"(?:-(?P<prerelease>[0-9A-Za-z.-]+))?$"
 )
 _RELEASE_NAME_RE = re.compile(
-    r"^(?P<prefix>TokenScope|TokenSpider)-v(?P<version>[0-9A-Za-z.-]+)-windows-x64\.exe$",
+    r"^(?P<prefix>TokenMeter|TokenSpider|TokenScope)-v(?P<version>[0-9A-Za-z.-]+)-windows-x64\.exe$",
     re.IGNORECASE,
 )
 _UPDATER_NAME_RE = re.compile(
-    r"^(?:TokenScopeUpdater|TokenSpiderUpdater)-v(?P<version>[0-9A-Za-z.-]+)-windows-x64\.exe$",
+    r"^(?:TokenMeterUpdater|TokenSpiderUpdater|TokenScopeUpdater)-v(?P<version>[0-9A-Za-z.-]+)-windows-x64\.exe$",
     re.IGNORECASE,
 )
 _SHA256_LINE_RE = re.compile(r"^(?P<sha>[A-Fa-f0-9]{64})\s+\*?(?P<name>.+)$")
@@ -235,6 +235,10 @@ def is_packaged_windows_executable() -> bool:
 
 def stable_target_path(current_executable: Path | None = None) -> Path:
     current = (current_executable or Path(sys.executable)).resolve()
+    # Overwrite a legacy stable executable in place so existing shortcuts keep
+    # working; versioned downloads migrate to the new TokenMeter stable name.
+    if current.name.lower() in {"tokenmeter.exe", "tokenspider.exe", "tokenscope.exe"}:
+        return current
     return current.with_name(MAIN_EXECUTABLE_NAME)
 
 
@@ -687,7 +691,10 @@ def _release_version_from_payload(payload: dict[str, object]) -> str:
 def _select_main_asset(version: str, assets: Iterable[object]) -> ReleaseAsset:
     expected_names = [
         MAIN_RELEASE_ASSET_TEMPLATE.format(version=version).lower(),
-        LEGACY_MAIN_RELEASE_ASSET_TEMPLATE.format(version=version).lower(),
+        *(
+            template.format(version=version).lower()
+            for template in LEGACY_MAIN_RELEASE_ASSET_TEMPLATES
+        ),
     ]
     for name in expected_names:
         for asset in assets:
@@ -707,7 +714,10 @@ def _select_main_asset(version: str, assets: Iterable[object]) -> ReleaseAsset:
 def _select_updater_asset(version: str, assets: Iterable[object]) -> ReleaseAsset:
     expected_names = [
         UPDATER_RELEASE_ASSET_TEMPLATE.format(version=version).lower(),
-        LEGACY_UPDATER_RELEASE_ASSET_TEMPLATE.format(version=version).lower(),
+        *(
+            template.format(version=version).lower()
+            for template in LEGACY_UPDATER_RELEASE_ASSET_TEMPLATES
+        ),
     ]
     # Some existing releases may still carry the pre-rename updater asset name.
     # Keep accepting it so old release metadata can still drive in-app updates.

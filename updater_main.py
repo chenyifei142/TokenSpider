@@ -38,7 +38,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _configure_logging(log_path: Path) -> logging.Logger:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("TokenSpiderUpdater")
+    logger = logging.getLogger(f"{APP_DISPLAY_NAME}Updater")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
     handler = logging.FileHandler(log_path, encoding="utf-8")

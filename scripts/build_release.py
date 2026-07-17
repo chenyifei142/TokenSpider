@@ -23,8 +23,8 @@ from app_identity import (
 )
 
 DIST_DIR = ROOT / "dist"
-MAIN_SPEC = ROOT / "TokenSpider.spec"
-UPDATER_SPEC = ROOT / "TokenSpiderUpdater.spec"
+MAIN_SPEC = ROOT / "TokenMeter.spec"
+UPDATER_SPEC = ROOT / "TokenMeterUpdater.spec"
 SHA_FILE = DIST_DIR / "SHA256SUMS.txt"
 
 
@@ -89,7 +89,7 @@ def build_release(*, skip_smoke_test: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Build TokenSpider release assets")
+    parser = argparse.ArgumentParser(description="Build TokenMeter release assets")
     parser.add_argument("--skip-smoke-test", action="store_true")
     args = parser.parse_args(argv)
     build_release(skip_smoke_test=args.skip_smoke_test)

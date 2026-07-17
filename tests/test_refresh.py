@@ -83,7 +83,7 @@ class RefreshTests(unittest.TestCase):
 
         widget.tray.showMessage.assert_called_once()
         title, message, icon, timeout = widget.tray.showMessage.call_args.args
-        self.assertEqual(title, "TokenSpider：DeepSeek 已进入高峰计价")
+        self.assertEqual(title, "TokenMeter：DeepSeek 已进入高峰计价")
         self.assertIn("本时段至 12:00（北京时间）", message)
         self.assertEqual(icon, QSystemTrayIcon.MessageIcon.Warning)
         self.assertEqual(timeout, 10_000)
@@ -166,7 +166,7 @@ class RefreshTests(unittest.TestCase):
 
         self.assertEqual(widget.tray.showMessage.call_count, 1)
         title, message, icon, timeout = widget.tray.showMessage.call_args.args
-        self.assertEqual(title, "TokenSpider：登录凭据已失效")
+        self.assertEqual(title, "TokenMeter：登录凭据已失效")
         self.assertIn("Cookie 已失效", message)
         self.assertIn("点击此通知", message)
         self.assertEqual(icon, QSystemTrayIcon.MessageIcon.Warning)
