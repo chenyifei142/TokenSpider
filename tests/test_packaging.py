@@ -39,14 +39,20 @@ def test_main_executable_uses_stable_name_and_project_icon():
     options = _call_keywords("TokenMeter.spec", "EXE")
 
     assert options["name"] == "TokenMeter"
-    assert options["icon"] == ["assets/TokenSpider.ico"]
+    assert options["icon"] == ["assets/TokenMeter.ico"]
+
+
+def test_runtime_icon_is_packaged_for_qt_windows_and_tray():
+    options = _call_keywords("TokenMeter.spec", "Analysis")
+
+    assert ("assets/TokenMeter.ico", "assets") in options["datas"]
 
 
 def test_updater_executable_is_packaged_separately():
     options = _call_keywords("TokenMeterUpdater.spec", "EXE")
 
     assert options["name"] == "TokenMeterUpdater"
-    assert options["icon"] == ["assets/TokenSpider.ico"]
+    assert options["icon"] == ["assets/TokenMeter.ico"]
 
 
 def test_both_specs_use_onedir_collect_layout():

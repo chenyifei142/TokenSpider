@@ -15,6 +15,11 @@ def test_installer_has_stable_per_user_identity_and_paths():
     assert (ROOT / "installer" / "languages" / "ChineseSimplified.isl").is_file()
 
 
+def test_installer_uses_tokenmeter_brand_icon():
+    assert "SetupIconFile=..\\assets\\TokenMeter.ico" in SCRIPT
+    assert (ROOT / "assets" / "TokenMeter.ico").is_file()
+
+
 def test_installer_creates_both_shortcuts_and_preserves_data():
     assert "{userdesktop}\\TokenMeter" in SCRIPT
     assert "{group}\\TokenMeter" in SCRIPT

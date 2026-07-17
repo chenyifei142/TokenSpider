@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal, TypeAlias
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
@@ -779,7 +780,14 @@ def metric_icon(name: str, size: int = 18) -> QPixmap:
 
 
 def app_icon(size: int = 64) -> QIcon:
-    """Port the existing spider-web tray mark to a high-DPI Qt pixmap."""
+    """Load the shared TokenMeter icon used by windows, tray, and branding."""
+    icon_path = Path(__file__).resolve().parents[1] / "assets" / "TokenMeter.ico"
+    icon = QIcon(str(icon_path))
+    if not icon.isNull():
+        return icon
+
+    # Keep startup resilient in partial source checkouts or malformed packages;
+    # release builds include the ICO explicitly through TokenMeter.spec.
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)

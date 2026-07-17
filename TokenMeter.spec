@@ -5,7 +5,8 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    # Qt loads the same ICO at runtime for the window, tray, and panel branding.
+    datas=[("assets/TokenMeter.ico", "assets")],
     # pyqtgraph 0.14 启动时会动态导入这两个模块；显式保留可以避免
     # PyInstaller 静态分析遗漏后，发布版在冷启动阶段报缺模块。
     hiddenimports=["PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets"],
@@ -83,7 +84,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=["assets/TokenSpider.ico"],
+    icon=["assets/TokenMeter.ico"],
 )
 
 coll = COLLECT(

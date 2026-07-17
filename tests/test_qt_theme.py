@@ -10,6 +10,7 @@ from ui.qt_theme import (
     DARK_THEME,
     LIGHT_THEME,
     ThemeController,
+    app_icon,
     build_app_style,
     configure_theme,
     current_theme,
@@ -17,6 +18,14 @@ from ui.qt_theme import (
 
 
 APP = QApplication.instance() or QApplication([])
+
+
+def test_app_icon_loads_tokenmeter_asset_at_small_and_window_sizes():
+    icon = app_icon(64)
+
+    assert not icon.isNull()
+    assert not icon.pixmap(16, 16).isNull()
+    assert not icon.pixmap(64, 64).isNull()
 
 
 def _relative_luminance(color: str) -> float:
