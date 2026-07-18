@@ -140,6 +140,13 @@ class MiMoProviderTests(unittest.TestCase):
 
 
 class DeepSeekProviderTests(unittest.TestCase):
+    def provider_config(self):
+        return {
+            "DEEPSEEK_API_KEY": "",
+            "DEEPSEEK_AUTH": "Bearer test",
+            "DEEPSEEK_COOKIE": "session=test",
+        }
+
     @patch("api.providers.deepseek.official_api.build_session")
     @patch("api.providers.deepseek.platform_api.build_session")
     def test_settings_provider_instances_do_not_share_sessions(
@@ -173,6 +180,72 @@ class DeepSeekProviderTests(unittest.TestCase):
 
         platform_session.close.assert_called_once_with()
         official_session.close.assert_called_once_with()
+
+    @patch("api.providers.deepseek.platform_api.get_user_summary")
+    def test_summary_cache_is_shared_only_within_one_refresh(self, get_summary):
+        get_summary.return_value = {
+            "normal_wallets": [
+                {"currency": "CNY", "balance": "8", "token_estimation": 10}
+            ],
+            "monthly_costs": [{"amount": "2"}],
+            "monthly_token_usage": 30,
+        }
+        provider = DeepSeekProvider(self.provider_config())
+        try:
+            provider.reset_refresh_cache()
+            provider.fetch_balance()
+            provider.fetch_summary()
+            self.assertEqual(get_summary.call_count, 1)
+
+            provider.reset_refresh_cache()
+            provider.fetch_summary()
+            self.assertEqual(get_summary.call_count, 2)
+        finally:
+            provider.close()
+
+    @patch("api.providers.deepseek.platform_api.get_user_summary")
+    def test_previous_summary_error_does_not_pollute_next_refresh(self, get_summary):
+        get_summary.side_effect = [
+            APIError("NETWORK_TIMEOUT", "summary", "timeout"),
+            {"monthly_costs": [], "monthly_token_usage": 7},
+        ]
+        provider = DeepSeekProvider(self.provider_config())
+        try:
+            provider.reset_refresh_cache()
+            first, first_error = provider.fetch_summary()
+            provider.reset_refresh_cache()
+            second, second_error = provider.fetch_summary()
+        finally:
+            provider.close()
+
+        self.assertIsNone(first)
+        self.assertEqual(first_error.code, "NETWORK_TIMEOUT")
+        self.assertEqual(second.month_tokens, 7)
+        self.assertIsNone(second_error)
+
+    @patch("api.providers.deepseek.platform_api.get_user_summary")
+    @patch("api.providers.deepseek.official_api.get_balance")
+    def test_official_balance_failure_returns_web_fallback_warning(
+        self, get_official_balance, get_summary
+    ):
+        config = self.provider_config()
+        config["DEEPSEEK_API_KEY"] = "sk-test"
+        get_official_balance.side_effect = APIError(
+            "AUTH_EXPIRED", "balance", "expired"
+        )
+        get_summary.return_value = {
+            "normal_wallets": [
+                {"currency": "CNY", "balance": "12.5", "token_estimation": 4}
+            ]
+        }
+        provider = DeepSeekProvider(config)
+        try:
+            balance, warning = provider.fetch_balance()
+        finally:
+            provider.close()
+
+        self.assertEqual(str(balance.amount), "12.5")
+        self.assertEqual(warning.code, "OFFICIAL_BALANCE_FALLBACK")
 
     @patch("api.providers.deepseek.config_manager.get")
     @patch("api.providers.deepseek.platform_api.get_usage_cost")

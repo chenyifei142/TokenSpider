@@ -24,6 +24,17 @@ class APIError(Exception):
         return self.message
 
 
+@dataclass(frozen=True)
+class DeepSeekWebProfile:
+    chrome_major: str = "147"
+    app_version: str = "20240425.0"
+    accept_language: str = "zh-CN,zh;q=0.9"
+
+
+# 这些字段仅用于兼容 DeepSeek 网页私有接口，不允许覆盖请求域名或本地路径。
+WEB_PROFILE = DeepSeekWebProfile()
+
+
 def _build_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
@@ -57,18 +68,21 @@ def _headers(config: Mapping[str, Any] | None = None) -> dict[str, str]:
     # 版本集中保留在适配器中，平台策略变化时只需更新这里。
     return {
         "accept": "*/*",
-        "accept-language": "zh-CN,zh;q=0.9",
+        "accept-language": WEB_PROFILE.accept_language,
         "authorization": _config_get(config, "DEEPSEEK_AUTH", ""),
-        "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+        "sec-ch-ua": (
+            f'"Google Chrome";v="{WEB_PROFILE.chrome_major}", '
+            f'"Not.A/Brand";v="8", "Chromium";v="{WEB_PROFILE.chrome_major}"'
+        ),
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
-        "x-app-version": "20240425.0",
+        "x-app-version": WEB_PROFILE.app_version,
         "cookie": _config_get(config, "DEEPSEEK_COOKIE", ""),
         "referer": f"{base}/usage",
         "user-agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/147.0.0.0 Safari/537.36"
+            f"Chrome/{WEB_PROFILE.chrome_major}.0.0.0 Safari/537.36"
         ),
     }
 

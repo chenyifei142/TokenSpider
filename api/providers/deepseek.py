@@ -211,6 +211,7 @@ class DeepSeekProvider(Provider):
         return self._summary_cache or {}
 
     def fetch_balance(self) -> tuple[ProviderBalance | None, FetchError | None]:
+        official_warning: FetchError | None = None
         if str(self.config_get("DEEPSEEK_API_KEY", "")).strip():
             try:
                 payload = official_api.get_balance(
@@ -222,10 +223,16 @@ class DeepSeekProvider(Provider):
                 for info in infos:
                     if isinstance(info, dict) and info.get("currency") == "CNY":
                         return ProviderBalance("CNY", _decimal(info.get("total_balance"))), None
+                raise ValueError("官方余额接口未返回人民币余额")
             except Exception as exc:
                 config_manager.logger().warning(
                     "DeepSeek official balance unavailable: code=%s",
                     getattr(exc, "code", type(exc).__name__),
+                )
+                official_warning = FetchError(
+                    "OFFICIAL_BALANCE_FALLBACK",
+                    "账户余额",
+                    "API Key 余额接口不可用，当前余额来自网页账户摘要",
                 )
 
         if not self._has_platform_credentials():
@@ -241,7 +248,7 @@ class DeepSeekProvider(Provider):
                         "CNY",
                         _decimal(wallet.get("balance")),
                         safe_int(wallet.get("token_estimation")),
-                    ), None
+                    ), official_warning
             return None, FetchError("NO_DATA", "账户余额", "DeepSeek 未返回人民币余额")
         except Exception as exc:
             return None, _fetch_error("账户余额", exc)

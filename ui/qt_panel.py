@@ -2261,6 +2261,8 @@ class MainPanel(QFrame):
         if loading:
             return "正在更新", theme.accent
         codes = {error.code for error in data.errors}
+        if "OFFICIAL_BALANCE_FALLBACK" in codes:
+            return "API Key 余额不可用，已使用网页余额", theme.warning
         if "NOT_CONFIGURED" in codes:
             return "尚未配置 Token/Cookie，请前往设置", theme.warning
         if "AUTH_EXPIRED" in codes:
