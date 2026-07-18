@@ -509,26 +509,47 @@ class TokenData:
                 # 收起状态的 MiMo 悬浮球只需当前日金额；跳过历史补同步，避免它阻塞可见数值更新。
                 request_months = [(current_day.month, current_day.year)]
             else:
-                request_months = months_for_week(current_day)
+                current_month = (current_day.month, current_day.year)
+                request_months = [current_month]
                 try:
-                    for month in history.unsynced_months(
+                    unsynced = history.unsynced_months(
                         months_for_activity(current_day), provider.id
-                    ):
+                    )
+                    for month in unsynced:
                         if month in request_months:
                             continue
                         request_months.append(month)
-                        if len(request_months) >= len(months_for_week(current_day)) + HISTORY_SYNC_BATCH_SIZE:
+                        if len(request_months) >= 1 + HISTORY_SYNC_BATCH_SIZE:
                             break
                 except Exception:
                     config_manager.logger().exception("History sync state read failed for %s", provider.id)
                     per.errors.append(FetchError("LOCAL_STORAGE", "历史缓存", "本地同步状态读取失败"))
 
             try:
-                payloads, payload_errors = provider.fetch_payloads(request_months)
+                fetched_payloads, payload_errors = provider.fetch_payloads(request_months)
             except Exception as exc:
                 config_manager.logger().exception("Payload fetch failed for %s", provider.id)
-                payloads, payload_errors = [], [FetchError("UNKNOWN_ERROR", "用量明细", str(exc))]
+                fetched_payloads, payload_errors = [], [FetchError("UNKNOWN_ERROR", "用量明细", str(exc))]
             per.errors.extend(payload_errors)
+            payloads = list(fetched_payloads)
+            for month, year in months_for_week(current_day):
+                if (month, year) in request_months:
+                    continue
+                try:
+                    cached_payload = history.provider_monthly_payload(
+                        provider.id, year, month
+                    )
+                except Exception:
+                    config_manager.logger().exception(
+                        "Historical month cache read failed for %s", provider.id
+                    )
+                    per.errors.append(
+                        FetchError("LOCAL_STORAGE", "历史缓存", "本地历史月份读取失败")
+                    )
+                    continue
+                if cached_payload is not None:
+                    # 完整历史月份只从 SQLite 参与本轮聚合，不再发送网络请求。
+                    payloads.append(cached_payload)
             if payloads:
                 today_tokens, week_tokens, today_cost, week_cost = _sum_from_payloads(
                     payloads, current_day
@@ -554,7 +575,12 @@ class TokenData:
                     and tuple(payload["_month"]) != (current_day.month, current_day.year)
                 ]
                 try:
-                    history.save_usage(payloads, payloads, completed, provider.id)
+                    history.save_usage(
+                        fetched_payloads,
+                        fetched_payloads,
+                        completed,
+                        provider.id,
+                    )
                 except Exception:
                     config_manager.logger().exception("History save failed for %s", provider.id)
                     per.errors.append(FetchError("LOCAL_STORAGE", "历史缓存", "本地历史保存失败"))

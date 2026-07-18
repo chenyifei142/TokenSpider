@@ -743,7 +743,14 @@ class MiMoProvider(Provider):
                     ],
                 })
             days = sorted(by_date.values(), key=lambda d: d["date"])
-            payloads.append({"days": days, "total": []})
+            payloads.append(
+                {
+                    "days": days,
+                    "total": [],
+                    "_month": (month, year),
+                    "_complete": True,
+                }
+            )
         return payloads, errors
 
 

@@ -38,7 +38,7 @@ def _append_usage(
     *,
     is_cost: bool,
 ) -> None:
-    days = payload.get("days", [])
+    days = payload.get("days")
     if not isinstance(days, list):
         raise ValueError("days 字段不是列表")
     for day in days:

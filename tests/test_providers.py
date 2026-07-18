@@ -269,6 +269,7 @@ class DeepSeekProviderTests(unittest.TestCase):
         payloads, errors = DeepSeekProvider().fetch_payloads([(7, 2026)])
         usages = payloads[0]["days"][0]["data"][0]["usage"]
         self.assertEqual(sum(row["amount"] for row in usages), 9)
+        self.assertFalse(payloads[0]["_complete"])
         self.assertEqual(errors[0].code, "NETWORK_TIMEOUT")
 
     @patch("api.providers.deepseek.config_manager.get")

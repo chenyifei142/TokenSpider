@@ -166,6 +166,27 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(data.today_tokens, 30)
         self.assertAlmostEqual(data.today_cost_cny, .23)
 
+    def test_complete_previous_month_uses_cache_without_refetch(self):
+        provider = FakeProvider(payloads=[payload("2026-07-01", 20, ".2")])
+        cached = payload("2026-06-30", 10, ".1")
+        with (
+            patch("data.store.history.unsynced_months", return_value=[]),
+            patch("data.store.history.provider_monthly_payload", return_value=cached),
+        ):
+            data = self.fetch_with(provider, today=date(2026, 7, 1))
+
+        self.assertEqual(provider.requested_months, [[(7, 2026)]])
+        self.assertEqual(data.weekly_tokens, 30)
+
+    def test_incomplete_previous_month_is_requested_again(self):
+        provider = FakeProvider(payloads=[payload("2026-07-01", 20, ".2")])
+        with patch(
+            "data.store.history.unsynced_months", return_value=[(6, 2026)]
+        ):
+            self.fetch_with(provider, today=date(2026, 7, 1))
+
+        self.assertEqual(provider.requested_months, [[(7, 2026), (6, 2026)]])
+
     def test_partial_payload_failure_keeps_available_values(self):
         provider = FakeProvider(
             payloads=[payload("2026-07-03", 7, "0")],
