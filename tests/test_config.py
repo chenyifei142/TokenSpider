@@ -245,6 +245,39 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual((source / "config.json").read_text(encoding="utf-8"), "source")
             self.assertEqual((target / "existing.txt").read_text(encoding="utf-8"), "keep")
 
+    def test_startup_does_not_apply_pending_directory_while_instance_is_running(self):
+        temp_root = Path.cwd() / ".test-appdata" / "tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temp_root) as directory:
+            root = Path(directory)
+            default = root / "default"
+            source = root / "source"
+            target = root / "target"
+            default.mkdir()
+            source.mkdir()
+            target.mkdir()
+            (source / "config.json").write_text("{}", encoding="utf-8")
+            location_path = default / "location.json"
+            location_path.write_text(
+                json.dumps(
+                    {"data_dir": str(source), "pending_data_dir": str(target)}
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(config_manager, "DEFAULT_CONFIG_DIR", default),
+                patch.object(config_manager, "LOCATION_PATH", location_path),
+                patch.object(config_manager, "_another_instance_running", return_value=True),
+                patch.object(config_manager, "_migrate_data_dir") as migrate,
+            ):
+                active, state = config_manager._initialize_data_dir()
+
+            migrate.assert_not_called()
+            self.assertEqual(active, source.resolve())
+            self.assertEqual(state["pending_data_dir"], str(target))
+            self.assertFalse(any(target.iterdir()))
+
     def test_data_directory_rejects_relative_unc_and_nested_paths(self):
         with self.assertRaisesRegex(ValueError, "绝对路径"):
             config_manager._normalize_data_dir("relative/path")

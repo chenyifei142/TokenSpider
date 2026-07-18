@@ -140,6 +140,24 @@ class MiMoProviderTests(unittest.TestCase):
 
 
 class DeepSeekProviderTests(unittest.TestCase):
+    @patch("api.providers.deepseek.official_api.build_session")
+    @patch("api.providers.deepseek.platform_api.build_session")
+    def test_settings_provider_instances_do_not_share_sessions(
+        self, build_platform_session, build_official_session
+    ):
+        platform_sessions = [Mock(), Mock()]
+        official_sessions = [Mock(), Mock()]
+        build_platform_session.side_effect = platform_sessions
+        build_official_session.side_effect = official_sessions
+
+        first = DeepSeekProvider({"ACTIVE_PROVIDER": "deepseek"})
+        second = DeepSeekProvider({"ACTIVE_PROVIDER": "deepseek"})
+
+        self.assertIs(first._platform_session, platform_sessions[0])
+        self.assertIs(second._platform_session, platform_sessions[1])
+        self.assertIsNot(first._platform_session, second._platform_session)
+        self.assertIsNot(first._official_session, second._official_session)
+
     @patch("api.providers.deepseek.config_manager.get")
     @patch("api.providers.deepseek.platform_api.get_usage_cost")
     @patch("api.providers.deepseek.platform_api.get_usage_amount")
