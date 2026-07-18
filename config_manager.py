@@ -251,7 +251,8 @@ def config_dir() -> Path:
     return CONFIG_DIR
 
 
-CONFIG_DIR, _location_state = _initialize_data_dir()
+CONFIG_DIR = DEFAULT_CONFIG_DIR.resolve(strict=False)
+_location_state: dict[str, Any] = {}
 WIDGET_STATE_PATH = CONFIG_DIR / "widget-state.json"
 PANEL_LAYOUT_PATH = CONFIG_DIR / "panel-layout.json"
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -263,6 +264,37 @@ UPDATER_LOG_PATH = CONFIG_DIR / "TokenScopeUpdater.log"
 LEGACY_CONFIG_PATH = app_dir() / "config.py"
 _config: dict[str, Any] = DEFAULT_CONFIG.copy()
 _logger_ready = False
+_initialized = False
+
+
+def _set_runtime_paths(config_dir: Path) -> None:
+    global CONFIG_DIR, WIDGET_STATE_PATH, PANEL_LAYOUT_PATH, CONFIG_PATH, LOG_PATH
+    global UPDATE_STATE_PATH, UPDATE_CACHE_DIR, PENDING_UPDATE_CLEANUP_PATH
+    global UPDATER_LOG_PATH
+    CONFIG_DIR = config_dir
+    WIDGET_STATE_PATH = CONFIG_DIR / "widget-state.json"
+    PANEL_LAYOUT_PATH = CONFIG_DIR / "panel-layout.json"
+    CONFIG_PATH = CONFIG_DIR / "config.json"
+    LOG_PATH = CONFIG_DIR / "TokenSpider.log"
+    UPDATE_STATE_PATH = CONFIG_DIR / "update-state.json"
+    UPDATE_CACHE_DIR = CONFIG_DIR / "updates"
+    PENDING_UPDATE_CLEANUP_PATH = CONFIG_DIR / "pending-update-cleanup.json"
+    UPDATER_LOG_PATH = CONFIG_DIR / "TokenScopeUpdater.log"
+
+
+def initialize() -> None:
+    """Initialize the active data directory, logging, and persisted config once."""
+
+    global _initialized, _location_state
+    if _initialized:
+        return
+    active_dir, location_state = _initialize_data_dir()
+    _set_runtime_paths(active_dir)
+    _location_state = location_state
+    # 初始化标记必须先设置；配置读取失败后的日志记录不能递归触发初始化。
+    _initialized = True
+    logger()
+    load_config()
 
 
 def pending_data_dir() -> Path | None:
@@ -297,7 +329,7 @@ def schedule_data_dir_change(value: str | os.PathLike[str]) -> bool:
 def logger() -> logging.Logger:
     global _logger_ready
     log = logging.getLogger(APP_NAME)
-    if not _logger_ready:
+    if not _logger_ready and _initialized:
         handler = RotatingFileHandler(
             LOG_PATH, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
         )
@@ -771,5 +803,3 @@ def save_ui_theme(mode: str) -> str:
     _config = updated
     return normalized
 
-
-load_config()

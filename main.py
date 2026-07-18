@@ -7,13 +7,8 @@ import sys
 from ctypes import wintypes
 
 import config_manager
-from PySide6.QtWidgets import QApplication
 
 from app_identity import APP_DISPLAY_NAME, APP_VERSION, SINGLE_INSTANCE_MUTEX
-from app_update import cleanup_pending_update
-from ui.qt_theme import app_icon, configure_theme
-from ui.qt_tray import SystemTray
-from ui.qt_widget import FloatingWidget
 
 __version__ = APP_VERSION
 
@@ -57,6 +52,12 @@ def _handle_exception(exc_type, exc, traceback) -> None:
 
 class App:
     def __init__(self):
+        from PySide6.QtWidgets import QApplication
+
+        from ui.qt_theme import app_icon, configure_theme
+        from ui.qt_tray import SystemTray
+        from ui.qt_widget import FloatingWidget
+
         self.qt_app = QApplication.instance() or QApplication(sys.argv)
         self.qt_app.setQuitOnLastWindowClosed(False)
         self.qt_app.setApplicationName(APP_DISPLAY_NAME)
@@ -68,7 +69,6 @@ class App:
 
     def run(self):
         sys.excepthook = _handle_exception
-        cleanup_pending_update()
         config_manager.logger().info("%s %s started", APP_DISPLAY_NAME, __version__)
         self.tray.run()
         try:
@@ -78,12 +78,21 @@ class App:
             config_manager.logger().info("%s stopped", APP_DISPLAY_NAME)
 
 
-if __name__ == "__main__":
+def main() -> int:
     instance_handle = _acquire_single_instance()
     if instance_handle is None:
         ctypes.windll.user32.MessageBoxW(None, f"{APP_DISPLAY_NAME} 已在运行。", APP_DISPLAY_NAME, 0x40)
-    else:
-        try:
-            App().run()
-        finally:
-            _release_single_instance(instance_handle)
+        return 0
+    try:
+        config_manager.initialize()
+        # 更新清理依赖已解析的数据目录，但必须先于 QApplication 执行。
+        from app_update import cleanup_pending_update
+
+        cleanup_pending_update()
+        return int(App().run())
+    finally:
+        _release_single_instance(instance_handle)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

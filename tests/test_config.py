@@ -13,6 +13,34 @@ import config_manager
 
 
 class ConfigTests(unittest.TestCase):
+    def test_initialize_is_idempotent(self):
+        original_initialized = config_manager._initialized
+        original_state = config_manager._location_state
+        original_dir = config_manager.CONFIG_DIR
+        try:
+            config_manager._initialized = False
+            active = Path.cwd() / ".test-appdata" / "initialized"
+            with (
+                patch.object(
+                    config_manager,
+                    "_initialize_data_dir",
+                    return_value=(active, {"data_dir": str(active)}),
+                ) as initialize_dir,
+                patch.object(config_manager, "logger") as initialize_logger,
+                patch.object(config_manager, "load_config") as load_config,
+            ):
+                config_manager.initialize()
+                config_manager.initialize()
+
+            initialize_dir.assert_called_once_with()
+            initialize_logger.assert_called_once_with()
+            load_config.assert_called_once_with()
+            self.assertEqual(config_manager.CONFIG_DIR, active)
+        finally:
+            config_manager._set_runtime_paths(original_dir)
+            config_manager._location_state = original_state
+            config_manager._initialized = original_initialized
+
     def test_legacy_data_directory_and_new_credential_prefix(self):
         self.assertEqual(config_manager.DEFAULT_CONFIG_DIR.name, "TokenSpider")
         self.assertEqual(
