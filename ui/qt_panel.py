@@ -127,7 +127,23 @@ class MinuteCalendarWidget(QCalendarWidget):
         self.setLocale(QLocale(QLocale.Language.Chinese, QLocale.Country.China))
         self.setAccessibleName("分时日期日历")
         self.setFixedSize(264, 190)
+        self._selectable_dates: set[str] | None = None
         self.refresh_theme()
+
+    def setSelectableDates(self, values: list[QDate]) -> None:
+        self._selectable_dates = {
+            value.toString("yyyy-MM-dd") for value in values if value.isValid()
+        }
+        self.updateCells()
+
+    def isDateSelectable(self, value: QDate) -> bool:
+        return (
+            self.minimumDate() <= value <= self.maximumDate()
+            and (
+                self._selectable_dates is None
+                or value.toString("yyyy-MM-dd") in self._selectable_dates
+            )
+        )
 
     def refresh_theme(self) -> None:
         tokens = current_theme()
@@ -140,8 +156,7 @@ class MinuteCalendarWidget(QCalendarWidget):
     def paintCell(self, painter: QPainter, rect, value: QDate) -> None:
         tokens = current_theme()
         in_month = value.year() == self.yearShown() and value.month() == self.monthShown()
-        in_range = self.minimumDate() <= value <= self.maximumDate()
-        selectable = in_month and in_range
+        selectable = in_month and self.isDateSelectable(value)
         selected = selectable and value == self.selectedDate()
         today = selectable and value == QDate.currentDate() and not selected
         cell = rect.adjusted(4, 2, -4, -2)
@@ -217,6 +232,9 @@ class MinuteCalendarPopup(QFrame):
         self.calendar.setDateRange(minimum, maximum)
         self._update_month_header()
 
+    def setSelectableDates(self, values: list[QDate]) -> None:
+        self.calendar.setSelectableDates(values)
+
     def setDate(self, value: QDate) -> None:
         if not value.isValid():
             return
@@ -254,9 +272,9 @@ class MinuteCalendarPopup(QFrame):
         )
         if (
             not in_shown_month
-            or value < self.calendar.minimumDate()
-            or value > self.calendar.maximumDate()
+            or not self.calendar.isDateSelectable(value)
         ):
+            # Qt 仍可能通过键盘把高亮移到禁用日期；恢复原值可确保无数据日期不会被提交。
             self.setDate(self._selected_date)
             return
         self._selected_date = value
@@ -284,6 +302,7 @@ class MinuteDateEdit(QWidget):
         self._minimum_date = QDate(1752, 9, 14)
         self._maximum_date = QDate(9999, 12, 31)
         self._date = QDate.currentDate()
+        self._selectable_dates: list[QDate] | None = None
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(1, 1, 1, 1)
@@ -329,6 +348,18 @@ class MinuteDateEdit(QWidget):
         self.setDate(self._date)
         self._update_button_states()
 
+    def setSelectableDates(self, values: list[QDate]) -> None:
+        unique_values = {
+            value.toString("yyyy-MM-dd"): value
+            for value in values
+            if value.isValid() and self._minimum_date <= value <= self._maximum_date
+        }
+        self._selectable_dates = sorted(
+            unique_values.values(), key=lambda value: value.toJulianDay()
+        )
+        self.popup.setSelectableDates(self._selectable_dates)
+        self._update_button_states()
+
     def setDate(self, value: QDate) -> None:
         if not value.isValid():
             return
@@ -350,12 +381,34 @@ class MinuteDateEdit(QWidget):
 
     def _update_button_states(self) -> None:
         enabled = self.isEnabled()
-        self.previous_button.setEnabled(enabled and self._date > self._minimum_date)
+        if self._selectable_dates is None:
+            has_previous = self._date > self._minimum_date
+            has_next = self._date < self._maximum_date
+        else:
+            current_day = self._date.toJulianDay()
+            has_previous = any(
+                value.toJulianDay() < current_day for value in self._selectable_dates
+            )
+            has_next = any(
+                value.toJulianDay() > current_day for value in self._selectable_dates
+            )
+        self.previous_button.setEnabled(enabled and has_previous)
         self.date_button.setEnabled(enabled)
-        self.next_button.setEnabled(enabled and self._date < self._maximum_date)
+        self.next_button.setEnabled(enabled and has_next)
 
     def _change_day(self, offset: int) -> None:
-        self.setDate(self._date.addDays(offset))
+        if self._selectable_dates is None:
+            self.setDate(self._date.addDays(offset))
+            return
+        current_day = self._date.toJulianDay()
+        candidates = [
+            value
+            for value in self._selectable_dates
+            if (value.toJulianDay() - current_day) * offset > 0
+        ]
+        if candidates:
+            # 前后按钮跳过无数据日期，只移动到对应方向最近的有效日期。
+            self.setDate(min(candidates, key=lambda value: abs(value.daysTo(self._date))))
 
     def showCalendarPopup(self) -> None:
         if not self.isEnabled():
@@ -1951,10 +2004,23 @@ class MainPanel(QFrame):
             except (TypeError, ValueError):
                 retention_days = 3
             minimum_date = current_date.addDays(-(retention_days - 1))
-            self._minute_usage_days = [
-                minimum_date.addDays(offset).toString("yyyy-MM-dd")
-                for offset in range(retention_days)
-            ]
+            selectable_dates = sorted(
+                {
+                    value
+                    for value in data.minute_usage_days
+                    if (
+                        (parsed := QDate.fromString(value, "yyyy-MM-dd")).isValid()
+                        and minimum_date <= parsed <= current_date
+                        # 基线快照也会出现在日期列表中；只有图表确有明细时才允许选择。
+                        and bool(
+                            data.minute_usage
+                            if value == data.minute_usage_date
+                            else self._minute_usage_history.get(value)
+                        )
+                    )
+                }
+            )
+            self._minute_usage_days = selectable_dates
 
             if (
                 provider_changed
@@ -1962,23 +2028,42 @@ class MainPanel(QFrame):
                 or self._minute_selected_date not in self._minute_usage_days
                 or (previous_current_date != data.minute_usage_date and was_following_latest)
             ):
-                self._minute_selected_date = data.minute_usage_date
+                self._minute_selected_date = (
+                    data.minute_usage_date
+                    if data.minute_usage_date in self._minute_usage_days
+                    else (self._minute_usage_days[-1] if self._minute_usage_days else "")
+                )
             self._minute_follows_latest = (
                 self._minute_selected_date == self._minute_current_date
             )
 
             blocker = QSignalBlocker(self.minute_date_edit)
-            self.minute_date_edit.setDateRange(minimum_date, current_date)
-            self.minute_date_edit.setDate(
-                QDate.fromString(self._minute_selected_date, "yyyy-MM-dd")
-            )
+            if self._minute_usage_days:
+                available_dates = [
+                    QDate.fromString(value, "yyyy-MM-dd")
+                    for value in self._minute_usage_days
+                ]
+                self.minute_date_edit.setDateRange(
+                    available_dates[0], available_dates[-1]
+                )
+                self.minute_date_edit.setSelectableDates(available_dates)
+                self.minute_date_edit.setDate(
+                    QDate.fromString(self._minute_selected_date, "yyyy-MM-dd")
+                )
+            else:
+                # 没有可选数据时仍显示当前采样日期，但整体禁用，避免保留上个账号的旧日期。
+                self.minute_date_edit.setDateRange(current_date, current_date)
+                self.minute_date_edit.setSelectableDates([])
+                self.minute_date_edit.setDate(current_date)
             del blocker
         else:
             self._minute_selected_date = ""
             self._minute_follows_latest = True
 
         self.minute_date_edit.setEnabled(
-            current_date.isValid() and data.minute_usage_status != "unavailable"
+            bool(self._minute_usage_days)
+            and current_date.isValid()
+            and data.minute_usage_status != "unavailable"
         )
         self._render_minute_date(loading)
 

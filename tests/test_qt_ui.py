@@ -749,6 +749,23 @@ def test_minute_date_edit_calendar_range_month_navigation_and_disabled_state():
     picker.close()
 
 
+def test_minute_date_edit_disables_dates_without_data_and_skips_them():
+    picker = MinuteDateEdit()
+    picker.setDateRange(QDate(2026, 7, 12), QDate(2026, 7, 15))
+    picker.setSelectableDates([QDate(2026, 7, 12), QDate(2026, 7, 15)])
+    picker.setDate(QDate(2026, 7, 15))
+
+    assert not picker.popup.calendar.isDateSelectable(QDate(2026, 7, 13))
+    picker.previous_button.click()
+    assert picker.date() == QDate(2026, 7, 12)
+
+    picker.date_button.click()
+    APP.processEvents()
+    picker.popup._select_date(QDate(2026, 7, 14))
+    assert picker.date() == QDate(2026, 7, 12)
+    picker.close()
+
+
 def test_minute_date_selection_renders_history_and_refresh_keeps_user_choice():
     panel = MainPanel()
     data = sample_data()
@@ -797,6 +814,45 @@ def test_minute_date_selection_renders_history_and_refresh_keeps_user_choice():
         panel.update_data(switched)
         assert panel.minute_date_edit.date() == QDate(2026, 7, 15)
 
+    panel.close()
+
+
+def test_minute_date_selection_uses_only_dates_reported_with_data():
+    panel = MainPanel()
+    data = sample_data()
+    data.per_provider = [PerProviderData("mimo", "小米 MiMo")]
+    data.minute_usage_date = "2026-07-15"
+    data.minute_usage_status = "recorded"
+    data.minute_usage_days = ["2026-07-13", "2026-07-15"]
+    data.minute_usage = [
+        {"minute": 10, "token_type": "RESPONSE_TOKEN", "token_amount": 20}
+    ]
+    data.minute_usage_history = {
+        "2026-07-13": [
+            {"minute": 10, "token_type": "RESPONSE_TOKEN", "token_amount": 10}
+        ]
+    }
+
+    with patch(
+        "ui.qt_panel.config_manager.get",
+        side_effect=lambda key, default=None: 3 if key == "MINUTE_USAGE_RETENTION_DAYS" else default,
+    ):
+        panel.update_data(data)
+
+    panel.minute_previous_button.click()
+    assert panel.minute_date_edit.date() == QDate(2026, 7, 13)
+    assert not panel.minute_date_edit.popup.calendar.isDateSelectable(QDate(2026, 7, 14))
+
+    data.minute_usage = []
+    panel.update_data(data)
+    assert panel.minute_date_edit.date() == QDate(2026, 7, 13)
+    assert panel.minute_date_edit.isEnabled()
+    assert not panel.minute_date_edit.popup.calendar.isDateSelectable(QDate(2026, 7, 15))
+
+    data.minute_usage_history = {}
+    panel.update_data(data)
+    assert panel.minute_date_edit.date() == QDate(2026, 7, 15)
+    assert not panel.minute_date_edit.isEnabled()
     panel.close()
 
 

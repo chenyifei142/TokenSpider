@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "1.10.1"
+  #define MyAppVersion "1.10.2"
 #endif
 #define MyAppName "TokenMeter"
 #define MyAppExeName "TokenMeter.exe"
