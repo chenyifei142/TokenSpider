@@ -2004,18 +2004,20 @@ class MainPanel(QFrame):
             except (TypeError, ValueError):
                 retention_days = 3
             minimum_date = current_date.addDays(-(retention_days - 1))
+            reported_dates = set(data.minute_usage_days)
+            if data.minute_usage_status != "unavailable":
+                # 当天即使只有基线、尚无明细也要可选；空数据限制仅适用于历史日期。
+                reported_dates.add(data.minute_usage_date)
             selectable_dates = sorted(
                 {
                     value
-                    for value in data.minute_usage_days
+                    for value in reported_dates
                     if (
                         (parsed := QDate.fromString(value, "yyyy-MM-dd")).isValid()
                         and minimum_date <= parsed <= current_date
-                        # 基线快照也会出现在日期列表中；只有图表确有明细时才允许选择。
-                        and bool(
-                            data.minute_usage
-                            if value == data.minute_usage_date
-                            else self._minute_usage_history.get(value)
+                        and (
+                            value == data.minute_usage_date
+                            or bool(self._minute_usage_history.get(value))
                         )
                     )
                 }

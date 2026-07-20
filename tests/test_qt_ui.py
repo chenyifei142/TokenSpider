@@ -813,6 +813,7 @@ def test_minute_date_selection_renders_history_and_refresh_keeps_user_choice():
         switched.minute_usage_status = "recorded"
         panel.update_data(switched)
         assert panel.minute_date_edit.date() == QDate(2026, 7, 15)
+        assert panel.minute_date_edit.isEnabled()
 
     panel.close()
 
@@ -847,12 +848,13 @@ def test_minute_date_selection_uses_only_dates_reported_with_data():
     panel.update_data(data)
     assert panel.minute_date_edit.date() == QDate(2026, 7, 13)
     assert panel.minute_date_edit.isEnabled()
-    assert not panel.minute_date_edit.popup.calendar.isDateSelectable(QDate(2026, 7, 15))
+    assert panel.minute_date_edit.popup.calendar.isDateSelectable(QDate(2026, 7, 15))
 
     data.minute_usage_history = {}
     panel.update_data(data)
     assert panel.minute_date_edit.date() == QDate(2026, 7, 15)
-    assert not panel.minute_date_edit.isEnabled()
+    assert panel.minute_date_edit.isEnabled()
+    assert not panel.minute_date_edit.popup.calendar.isDateSelectable(QDate(2026, 7, 13))
     panel.close()
 
 
